@@ -1,0 +1,17 @@
+# 构建上下文瘦身（设计 13：移除构建缓存与开发依赖）。
+.git
+bin
+dist
+docs
+scripts
+server-data
+agent-data
+.gitea
+web
+*.db
+*.db-wal
+*.db-shm
+*.key
+.moori-key-*
+initial-admin-password.txt
+*.md

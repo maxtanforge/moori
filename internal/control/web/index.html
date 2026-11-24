@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Moori · Docker 管理控制台</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script src="/vendor/xterm.js" defer></script>
+  <script src="/vendor/addon-fit.js" defer></script>
+  <link rel="stylesheet" href="/vendor/uplot.css">
+  <script src="/vendor/uplot.js" defer></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div id="page-progress" class="page-progress" aria-hidden="true" hidden></div>
+  <div class="header-inner">
+    <div class="site-identity">
+      <a href="/" class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Moori<small>Docker 管理控制台</small></span></a>
+    </div>
+    <div id="workspace-header" class="workspace-header" hidden>
+      <button id="sidebar-toggle" data-action-icon="menu" type="button" aria-controls="console-sidebar" aria-expanded="false" hidden>菜单</button>
+      <nav class="workspace-location" aria-label="当前位置"><a id="workspace-section"></a><span id="workspace-path-divider" aria-hidden="true" hidden>/</span><a id="workspace-node" hidden></a></nav>
+      <button class="workspace-account" id="account-toggle" type="button" aria-label="账户设置" aria-controls="password-form" aria-expanded="false"><span id="workspace-avatar" aria-hidden="true"></span><span id="workspace-username"></span></button>
+      <button id="logout" data-action-icon="logout" type="button" hidden>退出登录</button>
+    </div>
+  </div>
+</header>
+<div id="workspace">
+  <aside id="console-sidebar" class="site-sidebar" data-open="false" hidden>
+    <nav id="console-nav" class="site-nav" aria-label="控制台导航">
+      <a id="project-deployments-nav" href="/console" data-view="console" data-nav-icon="deploy">项目部署</a>
+      <div id="operations-nav" class="site-nav-group" hidden>
+        <a href="/environments" data-view="environments" data-nav-icon="server">运行环境</a>
+        <div id="node-resource-context" class="node-resource-context" hidden>
+          <div class="sidebar-node-picker">
+            <span class="sidebar-node-icon" id="sidebar-node-icon"></span>
+            <div class="sidebar-node-identity">
+              <span id="sidebar-node-label">本机 Docker</span>
+              <label><span class="visually-hidden">切换节点</span><select id="resource-node" hidden><option value="@local">本机 Docker</option></select></label>
+              <span id="sidebar-node-status"></span>
+            </div>
+          </div>
+          <div id="node-resource-nav" role="group" aria-label="当前节点的资源"></div>
+        </div>
+
+        <a href="/settings/registries" data-view="settings" data-nav-icon="settings">系统设置</a>
+      </div>
+    </nav>
+  </aside>
+<main id="main" tabindex="-1">
+  <p id="notice" role="status" aria-live="polite"></p>
+  <section id="setup-panel" class="login" hidden>
+    <span class="workspace-glyph" data-heading-icon="settings" aria-hidden="true"></span>
+    <h1>欢迎使用 Moori</h1><p>设置管理员账号和密码，开始使用。</p>
+    <form id="setup-form" method="post">
+      <label>管理员账号<input name="username" value="admin" required autocomplete="username" maxlength="64" pattern="[A-Za-z0-9_.-]+"></label>
+      <label>密码<input name="password" type="password" required autocomplete="new-password" minlength="12" maxlength="1024"></label>
+      <label>确认密码<input name="confirmation" type="password" required autocomplete="new-password" minlength="12" maxlength="1024"></label>
+      <p>密码至少 12 个字符，之后可在账户设置中修改。</p>
+      <button type="submit">创建管理员并进入控制台</button>
+    </form>
+  </section>
+  <section id="login-panel" class="login" hidden>
+    <span class="workspace-glyph" data-heading-icon="server" aria-hidden="true"></span>
+    <h1>登录</h1>
+    <form id="login-form" method="post">
+      <label>用户名<input name="username" required autocomplete="username" maxlength="64"></label>
+      <label>密码<input name="password" type="password" required autocomplete="current-password"></label>
+      <button type="submit">登录控制台</button>
+    </form>
+  </section>
+  <section id="boot-failure" class="login" hidden>
+    <span class="workspace-glyph" data-heading-icon="server" aria-hidden="true"></span>
+    <h1>无法加载控制台</h1>
+    <p id="boot-failure-text"></p>
+    <button id="boot-retry" type="button">重试</button>
+  </section>
+  <div id="console" hidden>
+    <form id="password-form" method="post" class="card" hidden>
+      <h2>账户设置</h2>
+      <label>账号<input name="username" required autocomplete="username" maxlength="64" pattern="[A-Za-z0-9_.-]+"></label>
+      <label>当前密码<input name="current" type="password" autocomplete="current-password" required></label>
+      <label>新密码（留空则保持原密码）<input name="replacement" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+      <label>确认新密码<input name="confirmation" type="password" autocomplete="new-password" maxlength="1024"></label>
+      <button type="submit">保存并重新登录</button>
+    </form>
+    <div class="console-view" data-console-view="console">
+      <div class="toolbar console-heading">
+        <div class="page-title"><span class="workspace-glyph" data-heading-icon="deploy" aria-hidden="true"></span><h1 id="console-title" tabindex="-1">项目部署</h1></div>
+        <a id="deployment-back" class="editor-link" href="/settings/ci" hidden>返回流水线接入</a>
+        <button id="create-target" class="primary" type="button" aria-controls="onboarding" aria-expanded="false" hidden>创建部署目标</button>
+        <button id="reload" data-action-icon="refresh" type="button">刷新项目</button>
+      </div>
+      <section id="onboarding" class="card" aria-labelledby="target-form-heading" hidden>
+        <h2 id="target-form-heading">创建部署目标</h2>
+        <form id="target-form" method="post">
+          <div class="row">
+            <label>项目名称<input name="project" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="my-app"></label>
+            <label>目标名称<input name="target" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="my-app-production"></label>
+            <label>运行环境<select id="execution-mode" name="mode"><option value="local">本机 Docker</option><option value="existing">远程 Agent</option></select></label>
+          </div>
+          <p id="local-status"></p>
+          <div id="existing-agent-fields" hidden>
+            <div class="row"><label>远程 Agent<select name="existing" id="existing-agent"></select></label><button id="refresh-agents" type="button">刷新列表</button><button id="more-agents" type="button" hidden>更多 Agent</button></div>
+            <p>新节点可在<a href="/environments">运行环境</a>创建 Agent Token。</p>
+          </div>
+          <div class="resource-actions"><button class="primary" type="submit">创建目标</button><button id="cancel-target" type="button">取消</button></div>
+        </form>
+      </section>
+      <div class="toolbar filter-bar"><label>项目<select id="project"></select></label><button id="more-projects" hidden>更多项目</button><span id="role"></span></div>
+      <p id="empty-projects" hidden></p>
+      <div id="project-content" hidden>
+        <form id="deploy-form" class="card" hidden>
+          <h2>部署已发布版本</h2>
+          <div class="row"><label>目标<select name="target" id="target" required></select></label><button id="more-targets" type="button" hidden>更多目标</button>
+          <label>发布版本<select name="release" id="release" required></select></label><button id="more-releases" type="button" hidden>更多版本</button><button type="submit">申请部署</button></div>
+          <p>版本由 CI 或 publish-release 发布。</p>
+          <p id="release-empty" hidden>该目标暂无已发布版本，无法申请部署。</p>
+        </form>
+        <section class="card"><div class="toolbar"><h2>部署记录</h2><button id="more-deployments" hidden>更多记录</button></div>
+          <div class="table-wrap"><table><thead><tr><th scope="col">部署</th><th scope="col">目标</th><th scope="col">版本</th><th scope="col">状态</th></tr></thead><tbody id="deployments"></tbody></table></div>
+          <p id="empty-deployments" hidden>此项目暂无部署记录。</p>
+        </section>
+        <section id="details" class="card" hidden>
+          <div class="toolbar"><h2 id="detail-title">部署详情</h2><button id="refresh-detail" data-action-icon="refresh">刷新详情</button><button id="edit-deployment" type="button" hidden>修改配置</button><button id="redeploy" type="button" hidden>重新部署</button><button id="save-as-template" type="button" hidden>保存为模板</button></div>
+          <p id="detail-status"></p><p id="detail-digest" class="digest"></p>
+          <details><summary>实际部署快照</summary><pre id="snapshot"></pre></details>
+          <form id="action-form" hidden><label>操作原因<input name="note" required maxlength="2048"></label><button id="cancel-button" name="action" value="cancel" type="submit" class="danger">请求取消</button><button id="rollback-button" name="action" value="rollback" type="submit">回滚到此版本</button></form>
+          <div class="toolbar"><button id="logs-button">读取部署日志</button><button id="health-button">查看目标健康</button></div><pre id="diagnostics" hidden></pre>
+        </section>
+        <section id="administration" class="card" hidden>
+          <h2>项目成员</h2>
+          <form id="member-form"><div class="row">
+            <label>已有用户名<input name="username" required maxlength="64" autocomplete="off"></label>
+            <label>角色<select name="role"><option value="viewer">只读成员</option><option value="operator">运维成员</option><option value="project_admin">项目管理员</option><option value="none">无项目角色</option></select></label>
+            <button type="submit">保存成员权限</button>
+          </div></form>
+          <div class="table-wrap"><table><thead><tr><th scope="col">用户名</th><th scope="col">角色</th></tr></thead><tbody id="members"></tbody></table></div><button id="more-members" hidden>更多成员</button>
+          <p id="empty-members" hidden>暂无项目成员。</p>
+          <div class="toolbar"><h2>项目审计</h2><button id="more-audit" hidden>更多事件</button></div>
+          <div class="table-wrap"><table><thead><tr><th scope="col">时间</th><th scope="col">操作</th><th scope="col">操作人</th><th scope="col">对象与详情</th></tr></thead><tbody id="audit"></tbody></table></div>
+          <p id="empty-audit" hidden>暂无审计事件。</p>
+        </section>
+      </div>
+    </div>
+    <div class="console-view" data-console-view="environments" hidden>
+      <section id="environments" aria-labelledby="environments-title" hidden>
+        <header class="work-heading">
+          <div class="page-title"><span id="environments-title-icon" class="workspace-glyph" data-heading-icon="server" aria-hidden="true"></span><h1 id="environments-title" tabindex="-1">环境目录</h1></div>
+          <button id="reload-container-detail" data-action-icon="refresh" type="button" hidden>刷新容器详情</button>
+          <div id="environment-actions" class="resource-actions"><button id="add-remote" type="button" class="primary" aria-controls="agent-token-panel" aria-expanded="false">创建 Agent Token</button></div>
+        </header>
+        <div id="node-directory">
+          <aside id="directory-start" class="node-recovery" aria-labelledby="directory-start-title" hidden>
+            <h3 id="directory-start-title"></h3>
+            <p id="directory-start-hint" class="work-note"></p>
+          </aside>
+          <section id="agent-token-panel" class="card" aria-labelledby="agent-token-heading" hidden>
+            <h2 id="agent-token-heading">创建 Agent Token</h2>
+            <form id="agent-token-form" method="post">
+              <label>Agent 标识<input name="id" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" placeholder="server-2"></label>
+              <div class="resource-actions"><button class="primary" type="submit">生成 Token</button><button id="cancel-agent-token" type="button">取消</button></div>
+            </form>
+            <div id="agent-token-result" hidden>
+              <p>Token 只显示一次。在 Agent 端将下面两项设为环境变量，然后启动 Agent。</p>
+              <label>MOORI_ENDPOINT<input id="agent-endpoint" readonly spellcheck="false"></label>
+              <label>MOORI_AGENT_TOKEN<input id="agent-token-value" readonly autocomplete="off" spellcheck="false"></label>
+              <p>连接地址须从 Agent 主机可达。使用 Compose 时可将两项填入同目录下的 <code>.env</code> 文件。</p>
+              <div class="resource-actions">
+                <button id="copy-agent-token" type="button">复制 Token</button><button id="download-credential" type="button">下载 Token 文件</button>
+                <button id="download-compose" type="button">下载 Compose 配置</button><button id="dismiss-agent-token" type="button">已保存</button>
+              </div>
+            </div>
+          </section>
+          <div class="directory-layout">
+          <aside id="directory-totals" class="directory-totals" aria-label="环境概况"></aside>
+          <section class="work-panel directory-node-panel" aria-labelledby="directory-title">
+            <div class="work-panel-header"><h2 id="directory-title">Docker 节点</h2><label class="search-control"><span class="visually-hidden">搜索节点</span><input id="node-search" type="search" placeholder="搜索节点"></label><label class="directory-filter"><span class="visually-hidden">按节点状态筛选</span><select id="node-contact-filter"><option value="">全部状态</option><option value="online">在线</option><option value="offline">离线</option><option value="unavailable">未连接或不可用</option></select></label><button id="reload-node-directory" data-action-icon="refresh" type="button">刷新节点列表</button></div>
+            <div id="node-list"></div>
+            <p id="node-directory-status" class="work-note" role="status"></p>
+            <button id="more-resource-nodes" type="button" hidden>更多节点</button>
+          </section>
+          </div>
+        </div>
+        <div id="node-workspace" hidden>
+          <section id="node-context" class="node-context" aria-labelledby="node-heading">
+            <div class="node-identity">
+              <div class="node-identity-heading"><h2 id="node-heading"></h2><span id="node-kind" class="workspace-chip"></span><span id="node-contact" class="status-pill" hidden></span></div>
+              <div class="node-identity-meta"><p id="node-meta"></p><p id="resource-status" role="status"></p></div>
+            </div>
+            <div class="node-context-controls"><button id="edit-node-display-name" data-action-icon="edit" type="button" aria-controls="node-display-name-form" aria-expanded="false" hidden>编辑显示名</button><button id="reload-resources" data-action-icon="refresh" type="button">刷新快照</button></div>
+            <form id="node-display-name-form" class="node-display-name-form" method="post" hidden>
+              <label>节点显示名<input name="display_name" autocomplete="off" aria-describedby="node-display-name-hint"></label>
+              <div class="node-context-controls"><button type="submit" class="primary">保存</button><button id="cancel-node-display-name" type="button">取消</button></div>
+              <p id="node-display-name-hint">留空恢复默认名称。最多 64 个字符。</p>
+            </form>
+            <p id="node-display-name-status" role="status"></p>
+          </section>
+          <aside id="node-recovery" class="node-recovery" aria-label="节点恢复指引" hidden></aside>
+          <section id="node-resources" class="work-panel">
+            <div id="resource-panel-toolbar" class="work-panel-header" hidden>
+              <div class="resource-panel-title"><span id="resource-title-icon" class="workspace-glyph" aria-hidden="true"></span><h2 id="resource-title"></h2><span id="container-list-count" hidden></span></div>
+              <a id="create-container" class="editor-link primary" data-action-label-icon="add" href="/environments" hidden>创建容器</a>
+              <div id="container-filters" hidden>
+                <label class="search-control"><span class="visually-hidden">搜索容器</span><input id="container-search" type="search" placeholder="名称、镜像或 Compose"></label>
+                <label>
+                  <span class="visually-hidden">筛选容器状态</span>
+                  <select id="container-state-filter">
+                    <button><selectedcontent></selectedcontent></button>
+                    <option value=""><span class="state-marker" data-status="" aria-hidden="true"></span>全部状态</option>
+                    <option value="running"><span class="state-marker" data-status="running" aria-hidden="true"></span>运行中</option>
+                    <option value="exited"><span class="state-marker" data-status="exited" aria-hidden="true"></span>已停止</option>
+                    <option value="created"><span class="state-marker" data-status="created" aria-hidden="true"></span>已创建</option>
+                    <option value="restarting"><span class="state-marker" data-status="restarting" aria-hidden="true"></span>重启中</option>
+                    <option value="paused"><span class="state-marker" data-status="paused" aria-hidden="true"></span>已暂停</option>
+                    <option value="dead"><span class="state-marker" data-status="dead" aria-hidden="true"></span>异常退出</option>
+                  </select>
+                </label>
+              </div>
+              <button id="pull-image" type="button" class="primary" data-action-label-icon="download" hidden>拉取镜像</button>
+              <button id="import-image" type="button" data-action-label-icon="upload" hidden>导入镜像</button>
+              <button id="create-volume" type="button" class="primary" data-action-label-icon="add" hidden>创建卷</button>
+              <button id="create-network" type="button" class="primary" data-action-label-icon="add" hidden>创建网络</button>
+            </div>
+            <p id="resource-action-feedback" role="status" hidden></p>
+            <div id="container-inline-operation" class="container-inline-operation" hidden>
+              <p id="container-inline-status" role="status"></p>
+              <div id="container-inline-links" class="resource-actions"></div>
+            </div>
+            <div id="resource-view"></div>
+          </section>
+          <section id="container-logs-page" class="work-panel container-logs-page" aria-labelledby="container-logs-title" hidden>
+            <header class="container-logs-heading">
+              <div>
+                <nav class="container-logs-breadcrumb" aria-label="容器日志位置">
+                  <a id="container-logs-list" class="workspace-link" href="/environments">容器列表</a>
+                  <span aria-hidden="true">/</span>
+                  <a id="container-logs-back" class="workspace-link" href="/environments">容器详情</a>
+                </nav>
+                <h2 id="container-logs-title" tabindex="-1"></h2>
+              </div>
+              <div id="container-logs-controls" class="toolbar log-controls"></div>
+            </header>
+            <p id="container-logs-status" role="status"></p>
+            <pre id="container-logs-output" aria-label="容器日志" tabindex="0" hidden></pre>
+          </section>
+          <section id="container-terminal-page" class="work-panel container-terminal-page" aria-labelledby="container-terminal-title" hidden>
+            <header class="container-logs-heading terminal-heading">
+              <div>
+                <nav class="container-logs-breadcrumb" aria-label="容器终端位置">
+                  <a id="container-terminal-list" class="workspace-link" href="/environments">容器列表</a>
+                  <span aria-hidden="true">/</span>
+                  <a id="container-terminal-back" class="workspace-link" href="/environments">容器详情</a>
+                </nav>
+                <div class="terminal-identity">
+                  <span class="workspace-glyph" data-heading-icon="terminal" aria-hidden="true"></span>
+                  <h2 id="container-terminal-title" tabindex="-1"></h2>
+                </div>
+              </div>
+              <div id="container-terminal-controls" class="toolbar log-controls">
+                <button id="container-terminal-exit" type="button" data-action-label-icon="logout">退出终端</button>
+              </div>
+            </header>
+            <p id="container-terminal-status" role="status"></p>
+            <div id="container-terminal-output" class="container-terminal-output" aria-label="容器终端" tabindex="0" hidden></div>
+          </section>
+        </div>
+      </section>
+    </div>
+    <div class="console-view" data-console-view="monitoring" hidden>
+      <section id="monitoring" aria-labelledby="monitor-title" tabindex="-1" hidden>
+        <header class="work-heading"><div class="page-title"><span class="workspace-glyph" data-heading-icon="pulse" aria-hidden="true"></span><h1 id="monitor-title" tabindex="-1">节点监控</h1></div><a id="monitor-back" class="editor-link" href="/environments">返回节点概览</a></header>
+        <section class="work-panel" aria-labelledby="monitor-object">
+          <div class="work-panel-header monitor-heading">
+            <div>
+              <h2 id="monitor-object"></h2>
+              <p id="monitor-object-context" class="monitor-meta"></p>
+              <p id="monitor-last-sample" class="monitor-meta"></p>
+            </div>
+            <div class="monitor-controls">
+              <label>时间范围<select id="monitor-range">
+                <option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option>
+                <option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option>
+              </select></label>
+              <label class="check"><input id="monitor-auto" type="checkbox" checked>自动刷新（30 秒）</label>
+              <button id="monitor-refresh" data-action-icon="refresh" type="button">刷新监控</button>
+            </div>
+          </div>
+          <div class="monitor-content">
+            <p id="monitor-history-status" role="status"></p>
+            <div id="monitor-charts" class="monitor-charts"></div>
+            <div class="monitor-timelines">
+              <section aria-labelledby="monitor-events-title">
+                <h3 id="monitor-events-title">节点部署与操作</h3>
+                <ul id="monitor-events" class="monitor-timeline"></ul>
+              </section>
+              <section aria-labelledby="monitor-alerts-title">
+                <h3 id="monitor-alerts-title">节点告警</h3>
+                <ul id="monitor-alerts" class="monitor-timeline"></ul>
+              </section>
+            </div>
+          </div>
+        </section>
+      </section>
+    </div>
+    <div id="maintenance-page" class="console-view" data-console-view="maintenance" hidden>
+      <header class="work-heading maintenance-page-heading">
+        <div class="page-title"><span class="workspace-glyph" data-heading-icon="edit" aria-hidden="true"></span><h1 id="maintenance-title" tabindex="-1"></h1></div>
+        <a id="maintenance-back" class="editor-link" href="/console">返回详情</a>
+      </header>
+      <div id="maintenance-panel"></div>
+    </div>
+    <div class="console-view" data-console-view="settings" hidden>
+      <section id="settings" aria-labelledby="settings-heading" hidden>
+        <header class="work-heading">
+          <div class="page-title"><span class="workspace-glyph" data-heading-icon="settings" aria-hidden="true"></span><h1 id="settings-heading" tabindex="-1">系统设置</h1></div>
+        </header>
+        <nav id="settings-tabs" class="settings-tabs" aria-label="设置分区">
+          <a href="/settings/registries">镜像仓库</a>
+          <a href="/settings/compose-templates">Compose 模板</a>
+          <a href="/settings/users">用户管理</a>
+          <a href="/settings/ci">流水线接入</a>
+          <a href="/settings/webhooks">Webhook 管理</a>
+          <a href="/settings/alerts">告警通知</a>
+          <a href="/settings/audit">平台审计</a>
+        </nav>
+        <div id="settings-list" class="work-panel"></div>
+      </section>
+    </div>
+  </div>
+  <dialog id="management-dialog" aria-labelledby="management-title" tabindex="-1">
+    <header class="dialog-heading">
+      <h2 id="management-title"></h2>
+      <form method="dialog">
+        <button class="dialog-close" type="submit" data-action-icon="close" aria-label="关闭" title="关闭"></button>
+      </form>
+    </header>
+    <div id="management-content"></div>
+    <p id="management-status" role="status"></p>
+    <pre id="management-output" tabindex="0" hidden></pre>
+  </dialog>
+</main>
+</div>
+</body>
+</html>
