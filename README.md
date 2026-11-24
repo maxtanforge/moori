@@ -9,7 +9,7 @@
 
 ## 发行版本
 
-首个 GitHub 版本为 [v0.1.0](https://github.com/maxtanforge/moori/releases/tag/v0.1.0)。主服务镜像为 `ghcr.io/maxtanforge/moori:0.1.0`，远程节点使用 `ghcr.io/maxtanforge/moori-agent:0.1.0`。两个镜像均支持 Linux AMD64 和 ARM64。
+当前发布版本为 [v0.1.1](https://github.com/maxtanforge/moori/releases/tag/v0.1.1)。主服务镜像为 `ghcr.io/maxtanforge/moori:0.1.1`，远程节点使用 `ghcr.io/maxtanforge/moori-agent:0.1.1`。两个镜像均支持 Linux AMD64 和 ARM64。
 
 ## 构建与启动
 

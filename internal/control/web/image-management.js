@@ -270,7 +270,7 @@ function createImageDetailEditor(node,imageID) {
     } finally {
       busy = false;
       unlock();
-      if (tagReady && surface.visible()) void refreshAfterNodeMutation(node.id,'images');
+      if (tagReady && surface.visible()) void refreshAfterNodeMutation(node.id,['images']);
     }
   });
   return editor;

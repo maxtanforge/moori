@@ -194,6 +194,15 @@ func (i *Inventory) Prefetch(ctx context.Context) { i.Overview(ctx) }
 
 // Overview refreshes once per TTL, even when multiple callers poll together.
 func (i *Inventory) Overview(ctx context.Context) Overview {
+	return i.overview(ctx, false)
+}
+
+// Refresh collects a new snapshot even when a mutation follows a recent sample.
+func (i *Inventory) Refresh(ctx context.Context) Overview {
+	return i.overview(ctx, true)
+}
+
+func (i *Inventory) overview(ctx context.Context, force bool) Overview {
 	ctx, cancel := context.WithTimeout(ctx, i.timeout)
 	defer cancel()
 	select {
@@ -211,7 +220,7 @@ func (i *Inventory) Overview(ctx context.Context) Overview {
 	prev := i.cache
 	fresh := prev != nil && time.Since(i.fetched) < i.ttl
 	i.mu.Unlock()
-	if fresh {
+	if fresh && !force {
 		return *prev
 	}
 	o := refresh(ctx, i.docker, prev, &i.disk)

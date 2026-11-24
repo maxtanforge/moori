@@ -56,6 +56,7 @@ const (
 var (
 	ErrInvalid        = errors.New("invalid node operation")
 	ErrOutcomeUnknown = errors.New("Docker did not confirm the result")
+	ErrPullStalled    = errors.New("Docker stopped reporting image pull progress")
 	resourceName      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	composeName       = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,127}$`)
 	managedCompose    = regexp.MustCompile(`^moori-[0-9a-f]{32}$`)
@@ -201,7 +202,10 @@ func (a Action) Mutates() bool {
 }
 
 func (a Action) Timeout() time.Duration {
-	if a == RegistryPull || a == ContainerCreate || a == ContainerRelease || a == ImagePush || a.Archive() {
+	if a == RegistryPull {
+		return 6 * time.Hour
+	}
+	if a == ContainerCreate || a == ContainerRelease || a == ImagePush || a.Archive() {
 		return 15 * time.Minute
 	}
 	if a == ComposeRemove || a == ContainerReplace || a == ComposeSourceDeploy {

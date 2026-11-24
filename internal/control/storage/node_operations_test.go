@@ -107,6 +107,54 @@ func TestContainerCreateDeduplicatesPendingNameAndScrubsExpiredRequest(t *testin
 	}
 }
 
+func TestLongImagePullAndInterruptedClaim(t *testing.T) {
+	ctx := t.Context()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "control.db"))
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, err := store.InitializeAdmin(ctx, "admin", "test password", 8*time.Hour)
+	must(err)
+	must(store.EnsureLocalExecutor(ctx))
+	now := time.Now()
+	req := nodeops.Request{Action: nodeops.RegistryPull, Image: "alpine:latest"}
+	queue := func(at time.Time) nodeops.Operation {
+		t.Helper()
+		must(store.RecordNodeOperationCapability(ctx, LocalExecutorID, 1, at))
+		op, err := store.QueueNodeOperation(ctx, token, LocalExecutorID, 1, req, at)
+		must(err)
+		return op
+	}
+	lost := queue(now)
+	_, _, err = store.NextNodeOperation(ctx, LocalExecutorID, 1, now)
+	must(err)
+	later := now.Add(2 * time.Minute)
+	first := queue(later)
+	if first.ID == lost.ID {
+		t.Fatal("lost claim still blocks retry")
+	}
+	claimed, _, err := store.NextNodeOperation(ctx, LocalExecutorID, 1, later)
+	must(err)
+	if claimed.Operation != first.ID {
+		t.Fatal("retry did not receive the new claim")
+	}
+	_, err = store.RegistryOperation(ctx, SecretKey{}, LocalExecutorID, 1, first.ID, true)
+	must(err)
+	end := later.Add(90 * time.Minute)
+	if op := queue(end); op.ID != first.ID || op.State != nodeops.Running {
+		t.Fatalf("reopening the pull did not find the running operation: %+v", op)
+	}
+	must(store.CompleteNodeOperation(ctx, LocalExecutorID, 1, first.ID, nodeops.Succeeded, "", &nodeops.Result{Image: req.Image}, end))
+	finished, err := store.GetNodeOperation(ctx, token, LocalExecutorID, first.ID, end)
+	must(err)
+	if finished.Result == nil || finished.Result.Image != req.Image || finished.State != nodeops.Succeeded {
+		t.Fatal("lost the completed long pull result", finished)
+	}
+}
+
 func TestNodeOperationHistoryPagination(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, filepath.Join(t.TempDir(), "control.db"))

@@ -1,7 +1,7 @@
 # Set MOORI_ENDPOINT and MOORI_AGENT_TOKEN in a private .env file on the Agent host.
 services:
   moori-agent:
-    image: ${MOORI_AGENT_IMAGE:-ghcr.io/maxtanforge/moori-agent:0.1.0}
+    image: ${MOORI_AGENT_IMAGE:-ghcr.io/maxtanforge/moori-agent:0.1.1}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - moori-agent-data:/data

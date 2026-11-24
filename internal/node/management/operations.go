@@ -4,6 +4,7 @@ package management
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/maxtanforge/moori/internal/core/nodeops"
 	"github.com/maxtanforge/moori/internal/core/registry"
@@ -86,7 +87,11 @@ func (o *Operations) Run(ctx context.Context, req nodeops.Request) (nodeops.Resu
 	if err != nil {
 		return nodeops.Result{}, err
 	}
-	return nodeops.Result{Image: req.Image, ImageID: req.ImageID}, nil
+	result := nodeops.Result{Image: req.Image, ImageID: req.ImageID}
+	if req.Action == nodeops.RegistryPull {
+		result.ResourceObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return result, nil
 }
 
 func (o *Operations) operationCredential(ctx context.Context, operation string) (registry.Credential, error) {

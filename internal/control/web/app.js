@@ -531,13 +531,14 @@ async function loadNodeList(more = false) {
 let mutationRefresh;
 const mutationRefreshDelays = [0,750,1500,3000,5000];
 
-export async function refreshAfterNodeMutation(id,...sections) {
+export async function refreshAfterNodeMutation(id,sections = [],observedAt) {
   if (!platformAdmin || nodeRoute?.id !== id) return;
   const account = accountEpoch;
   const active = mutationRefresh?.id === id && mutationRefresh.account === account;
   const refresh = active ? mutationRefresh : {id,account,pending:new Map()};
   for (const section of sections.length ? sections : ['']) {
     refresh.pending.set(section,{
+      observed:Math.max(refresh.pending.get(section)?.observed || 0,Date.parse(observedAt) || 0),
       baseline: nodeSnapshot?.overview?.section_times?.[section],
       updated: nodeSnapshot?.updated_at,
       generated: nodeSnapshot?.overview?.generated_at,
@@ -562,9 +563,10 @@ export async function refreshAfterNodeMutation(id,...sections) {
         if (refresh.pending.get(section) !== entry) continue;
         const snapshot = nodeSnapshot;
         const times = snapshot?.overview?.section_times;
-        const fresh = snapshot?.overview?.available && !snapshot.read_failed &&
-          (section && times ? !!times[section] && times[section] !== entry.baseline :
-            snapshot.updated_at !== entry.updated || snapshot.overview.generated_at !== entry.generated);
+        let sampled = snapshot?.updated_at !== entry.updated || snapshot?.overview?.generated_at !== entry.generated;
+        if (entry.observed) sampled = Date.parse(times?.[section]) >= entry.observed;
+        else if (section && times) sampled = !!times[section] && times[section] !== entry.baseline;
+        const fresh = sampled && snapshot?.overview?.available && !snapshot.read_failed;
         entry.attempt++;
         if (fresh || entry.attempt >= mutationRefreshDelays.length) refresh.pending.delete(section);
         else entry.due = Date.now() + mutationRefreshDelays[entry.attempt];

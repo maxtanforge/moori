@@ -424,7 +424,7 @@ function editRegisteredCompose(page,node,name,recreate,sources,view) {
         files.set(edit.path,edit.content);
         invalidate();
         page.status.textContent = action === 'compose.source-save' ? '源文件已保存。' : '源文件已保存，部署完成。';
-        if (action === 'compose.source-deploy') void refreshAfterNodeMutation(node.id,'containers','images','networks','volumes');
+        if (action === 'compose.source-deploy') void refreshAfterNodeMutation(node.id,['containers','images','networks','volumes']);
       } finally {
         page.pending = false;
         if (page.visible()) {

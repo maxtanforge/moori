@@ -1002,7 +1002,7 @@ function confirmBulkContainerLifecycle(id,verb,selectable,barStatus) {
       surface.status.textContent = summary() + (pending().length ? '。其余结果可在操作记录查看。' : '');
     }
     if (account === accountEpoch && nodeRoute?.id === id) {
-      if (rows.some(row => row.job)) void refreshAfterNodeMutation(id,'containers');
+      if (rows.some(row => row.job)) void refreshAfterNodeMutation(id,['containers']);
     }
   },verb === 'stop');
   managementDialog('批量' + label + ' ' + targets.length + ' 个容器',

@@ -1,7 +1,7 @@
 # Publish Moori's HTTP port for the console and direct Agent connections.
 services:
   moori:
-    image: ${MOORI_SERVER_IMAGE:-ghcr.io/maxtanforge/moori:0.1.0}
+    image: ${MOORI_SERVER_IMAGE:-ghcr.io/maxtanforge/moori:0.1.1}
     # Local Docker execution runs inside the main service; no Agent is required.
     ports:
       - "${MOORI_BIND_IP:-0.0.0.0}:8080:8080"

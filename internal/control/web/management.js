@@ -354,6 +354,9 @@ export function renderNodeOperationHistory(route, body) {
           if (outcome) content.append(workspaceText('p',outcome,'work-note'));
           const links = workspaceText('div','','resource-actions');
           links.append(...operationFollowUpLinks(route.id,job));
+          if (job.action === 'image.pull' && job.target && ['failed','uncertain'].includes(job.state)) {
+            links.append(managementButton('重新拉取',() => pullNodeImage(nodeById(route.id),job.target)));
+          }
           content.append(links);
         } else {
           content.replaceChildren(resourceTable(['提交时间','操作','目标','状态'],jobs.map(job => [dateTime(job.created_at),
@@ -425,7 +428,9 @@ export async function performOperation(node, command, submitPath = nodeOperation
 }
 
 export async function reportOperation(node, initial, surface) {
-  const deadline = Date.now() + 45000;
+  const started = Date.now();
+  const pulling = (surface.command?.action || initial.action) === 'image.pull';
+  let readFailures = 0;
   const path = nodeOperationPath(node) + '/' + enc(initial.id);
   let job = initial;
   const recorded = Object.hasOwn(operationLabels,initial.action);
@@ -438,8 +443,15 @@ export async function reportOperation(node, initial, surface) {
     surface.results.append(link);
   }
   while (account === accountEpoch && (recorded || surface.visible()) && operationPending(job)) {
-    if (surface.visible()) surface.status.textContent = job.state === 'queued' ? '等待节点领取操作…' : '节点正在执行…';
-    if (Date.now() >= deadline) {
+    const elapsed = Math.max(0,Math.floor((Date.now() - started) / 1000));
+    if (surface.visible()) {
+      if (pulling) {
+        const stage = readFailures ? '暂时无法读取拉取状态，正在重试' :
+          job.state === 'queued' ? '等待节点领取拉取任务' : 'Docker 正在拉取镜像';
+        surface.status.textContent = stage + ' · 已等待 ' + elapsed + ' 秒。可关闭窗口，在操作记录中查看结果。';
+      } else surface.status.textContent = job.state === 'queued' ? '等待节点领取操作…' : '节点正在执行…';
+    }
+    if (!pulling && elapsed >= 45) {
       if (!surface.visible()) return;
       const recheck = managementButton('继续查看结果',async () => {
         const latest = await request(path);
@@ -451,11 +463,13 @@ export async function reportOperation(node, initial, surface) {
       surface.status.textContent = '操作仍在执行，编号 ' + initial.id;
       return;
     }
-    await new Promise(resolve => setTimeout(resolve,1000));
+    await new Promise(resolve => setTimeout(resolve,pulling && (readFailures || elapsed >= 45) ? 2500 : 1000));
     if (account === accountEpoch && (recorded || surface.visible())) {
       try {
         job = await request(path,undefined,undefined,AbortSignal.timeout(5000));
+        readFailures = 0;
       } catch (error) {
+        if (pulling && (!error.status || error.status >= 500) && ++readFailures <= 3) continue;
         if (!recorded) throw error;
         if (surface.visible()) surface.status.textContent = '操作已提交，暂时无法读取结果。请到操作记录核查后再重试。';
         return;
@@ -465,7 +479,7 @@ export async function reportOperation(node, initial, surface) {
   if (account !== accountEpoch || operationPending(job)) return;
   const inventory = operationInventorySections[command?.action || job.action];
   const applied = applyConfirmedResourceOperation(node,command,job);
-  if (inventory?.length) void refreshAfterNodeMutation(node.id,...inventory);
+  if (inventory?.length) void refreshAfterNodeMutation(node.id,inventory,job.result?.resource_observed_at);
   const lifecycleLabel = lifecycleLabels[command?.action];
   if (!surface.visible()) {
     if (nodeRoute?.id === node.id && (applied || lifecycleLabel && job.state === 'succeeded')) renderWorkspaceBody();
@@ -482,12 +496,18 @@ export async function reportOperation(node, initial, surface) {
     return job.state;
   }
   const labels = {succeeded:'操作成功', failed:'操作失败', uncertain:'执行结果待核查'};
-  const result = job.result?.log ?? job.result?.container ?? job.result?.volume ?? job.result?.network ?? job.result ?? '';
+  const result = pulling ? '' : job.result?.log ?? job.result?.container ?? job.result?.volume ?? job.result?.network ?? job.result ?? '';
   if (surface.output) {
     surface.output.textContent = typeof result === 'string' ? result : JSON.stringify(result,null,2);
     surface.output.hidden = !surface.output.textContent;
   }
   surface.status.textContent = [labels[job.state] || job.state,operationOutcomeMessage(job),job.result?.truncated && '输出已截断'].filter(Boolean).join(' · ');
+  if (pulling && job.state === 'succeeded') {
+    surface.status.textContent = '镜像拉取成功：' + (job.result?.image || command?.image || '已保存至节点');
+    const link = operationResourceLink(node.id,'image.pull');
+    if (surface.leave) link.addEventListener('click',surface.leave);
+    surface.results.append(link);
+  }
   if (recorded && ['failed','uncertain'].includes(job.state)) {
     for (const link of operationFollowUpLinks(node.id,job)) {
       if (surface.leave) link.addEventListener('click',surface.leave);
@@ -541,6 +561,9 @@ export async function reportOperation(node, initial, surface) {
 export function isMissingContainer(message) { return message === 'Docker container no longer exists on this node'; }
 
 export function containerOperationMessage(message) {
+  if (message === 'Docker stopped reporting image pull progress') return 'Docker 已连续 15 分钟未返回拉取进度，等待已结束。';
+  if (message === 'The node restarted before confirming the Docker operation. Refresh resources before retrying.') return '节点在确认操作结果前已重启。';
+  if (message === 'Docker did not confirm the result. Refresh resources before retrying.') return 'Docker 执行中断，节点未收到最终确认。';
   if (message === 'Docker image is used by a container; remove the container first') return '镜像被容器使用，无法删除。请先删除引用它的容器（包括已停止的容器）。';
   if (message === 'Docker volume is referenced by a container') return '卷仍被容器引用，无法删除。请检查关联容器，包括已经停止的容器。';
   if (message === 'Docker network is referenced by a container') return '网络仍连着容器，无法删除。请先断开连接，或通过 Compose 项目调整。';
@@ -549,7 +572,7 @@ export function containerOperationMessage(message) {
   if (message === 'Docker could not find the replacement image or an attached resource') return 'Docker 找不到替换所需的镜像或关联资源，请检查目标节点上的镜像、网络和挂载。';
   if (message === 'image is unavailable locally; pull it on this node first') return '目标节点没有这个镜像，请先在镜像列表拉取。';
   if (message === 'multiple enabled registries match this image at the same repository prefix') return '存在多个同域名、同前缀的共享仓库，请选择本次使用的仓库。';
-  if (message === 'Docker could not pull the container image') return '目标节点拉取镜像失败。请核对镜像路径、版本、节点网络和仓库读取权限。';
+  if (['Docker could not pull the container image','Docker could not pull the registry image'].includes(message)) return '目标节点拉取镜像失败。请核对镜像路径、版本、节点网络和仓库读取权限。';
   if (message === 'registry operation credentials are unavailable') return '节点未能取得本次拉取的仓库凭证，请核对仓库配置和连接状态。';
   if (message === 'private registry credentials require verified HTTPS') return '传递私有仓库凭证需要加密连接，请核对 Agent 的连接地址。';
   if (message === 'anonymous image pull failed; pull private images through an authorized registry first') return '匿名拉取镜像失败。如果是私有镜像，请先通过已授权的仓库拉取。';

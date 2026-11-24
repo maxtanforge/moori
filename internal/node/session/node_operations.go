@@ -135,6 +135,8 @@ func (c Client) startNodeOperation(ctx context.Context, active *workerState, ope
 		defer cancel()
 		result, err := c.NodeOperation(runCtx, req)
 		switch {
+		case errors.Is(err, nodeops.ErrPullStalled):
+			report.State, report.Error = nodeops.Uncertain, nodeops.ErrPullStalled.Error()
 		case err != nil:
 			report.Error = safeOperationError(err.Error())
 			if mutation && (runCtx.Err() != nil || errors.Is(err, nodeops.ErrOutcomeUnknown) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {

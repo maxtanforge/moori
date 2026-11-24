@@ -172,3 +172,18 @@ func TestPrefetchKeepsSnapshotWithinTTL(t *testing.T) {
 		t.Fatal(overview)
 	}
 }
+
+func TestRefreshSeesPulledImageWithinTTL(t *testing.T) {
+	ctx := context.Background()
+	docker := fixture()
+	inv := New(docker)
+	first := inv.Overview(ctx)
+	docker.images = append(docker.images, image.Summary{ID: "pulled", RepoTags: []string{"app:v2"}})
+	current := inv.Refresh(ctx)
+	if current.ImageCount != first.ImageCount+1 || current.SectionTimes["images"].Before(first.SectionTimes["images"]) {
+		t.Fatalf("post-pull inventory did not advance: %+v", current.Images)
+	}
+	if cached := inv.Overview(ctx); !cached.GeneratedAt.Equal(current.GeneratedAt) || cached.ImageCount != current.ImageCount {
+		t.Fatal("the next reader did not see the refreshed inventory")
+	}
+}

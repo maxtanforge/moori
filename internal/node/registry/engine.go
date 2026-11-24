@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
+	"time"
 
-	"github.com/maxtanforge/moori/internal/core/registry"
 	"github.com/docker/docker/api/types/image"
 	dockerRegistry "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
+	"github.com/maxtanforge/moori/internal/core/nodeops"
+	"github.com/maxtanforge/moori/internal/core/registry"
 )
 
 var (
@@ -52,30 +55,61 @@ func (e *Engine) Pull(ctx context.Context, value, platform string, credential re
 	if err != nil {
 		return errPull
 	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	const idleTimeout = 15 * time.Minute
+	timer := time.AfterFunc(idleTimeout, func() { cancel(nodeops.ErrPullStalled) })
+	defer timer.Stop()
 	body, err := e.client.ImagePull(ctx, ref.Reference, image.PullOptions{RegistryAuth: auth, Platform: platform})
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		return errPull
 	}
 	defer body.Close()
-	progress := &io.LimitedReader{R: body, N: 32 << 20}
+	const maxEventBytes = 1 << 20
+	progress := &io.LimitedReader{R: body, N: maxEventBytes}
 	decoder := json.NewDecoder(progress)
+	received, finished := false, false
 	for {
 		var event struct {
+			Status      string          `json:"status"`
 			Error       string          `json:"error"`
 			ErrorDetail json.RawMessage `json:"errorDetail"`
 		}
 		err := decoder.Decode(&event)
-		if err == io.EOF && progress.N > 0 {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if err == io.EOF && received && progress.N > 0 {
+			// An existing mutable tag also passes ImageInspect if the progress
+			// stream closes at a frame boundary halfway through its update.
+			if ref.Digest == "" && !finished {
+				return nodeops.ErrOutcomeUnknown
+			}
 			break
 		}
-		if err != nil || event.Error != "" || len(event.ErrorDetail) > 0 && string(event.ErrorDetail) != "null" {
+		if err != nil {
+			return nodeops.ErrOutcomeUnknown
+		}
+		if event.Error != "" || len(event.ErrorDetail) > 0 && string(event.ErrorDetail) != "null" {
 			return errPull
 		}
+		progress.N = maxEventBytes
+		received = true
+		if strings.HasPrefix(event.Status, "Status: Downloaded newer image for ") || strings.HasPrefix(event.Status, "Status: Image is up to date for ") {
+			finished = true
+		}
+		timer.Reset(idleTimeout)
 	}
 	// The workload can only start after Docker has persisted the exact reference.
 	inspected, err := e.client.ImageInspect(ctx, ref.Reference)
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
 	if err != nil || inspected.ID == "" {
-		return errPull
+		return nodeops.ErrOutcomeUnknown
 	}
 	return nil
 }

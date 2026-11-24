@@ -20,6 +20,7 @@ var (
 
 const nodeCapabilityTTL = 2 * time.Minute
 const nodeOperationStartWindow = 15 * time.Second
+const nodeOperationQueueTTL = 3 * time.Minute
 
 // A node-wide mutation could affect restored targets whose release no longer
 // matches the node's generation. Hold that node until placement is repaired.
@@ -159,10 +160,13 @@ func (s *Store) queueNodeOperation(ctx context.Context, tx *sql.Tx, actor, agent
 	if err := retireExpiredNodeOperations(ctx, tx, agent, now); err != nil {
 		return op, err
 	}
-	if req.Action == nodeops.ContainerReplace || req.Action == nodeops.ContainerCreate || req.Action == nodeops.ContainerRelease {
+	if req.Action == nodeops.ContainerReplace || req.Action == nodeops.ContainerCreate || req.Action == nodeops.ContainerRelease || req.Action == nodeops.RegistryPull {
 		field, value := "$.target", req.Target
 		if req.Action == nodeops.ContainerCreate || req.Action == nodeops.ContainerRelease {
 			field, value = "$.name", req.Name
+		}
+		if req.Action == nodeops.RegistryPull {
+			field, value = "$.image", req.Image
 		}
 		var previousActor string
 		var previousRequest []byte
@@ -183,7 +187,7 @@ func (s *Store) queueNodeOperation(ctx context.Context, tx *sql.Tx, actor, agent
 	}
 	// Docker output is transient. Retain administrative history separately
 	// from output so subsequent operations can purge old logs.
-	if _, err := tx.ExecContext(ctx, `UPDATE node_operations SET result=NULL WHERE agent=? AND result IS NOT NULL AND created_ms<?`, agent, now.Add(-time.Hour).UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE node_operations SET result=NULL WHERE agent=? AND result IS NOT NULL AND coalesce(completed_ms,created_ms)<?`, agent, now.Add(-time.Hour).UnixMilli()); err != nil {
 		return op, err
 	}
 	// Keep the small terminal receipt while a delivery can still replay it.
@@ -214,7 +218,7 @@ func (s *Store) queueNodeOperation(ctx context.Context, tx *sql.Tx, actor, agent
 		}
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO node_operations(id,agent,generation,actor,action,request,mutation,state,created_ms,expires_ms,history_target)
- VALUES(?,?,?,?,?,?,?,'queued',?,?,?)`, op.ID, op.Agent, op.Generation, actor, op.Action, request, req.Action.Mutates(), now.UnixMilli(), now.Add(3*time.Minute).UnixMilli(), nodeOperationHistoryTarget(req))
+ VALUES(?,?,?,?,?,?,?,'queued',?,?,?)`, op.ID, op.Agent, op.Generation, actor, op.Action, request, req.Action.Mutates(), now.UnixMilli(), now.Add(nodeOperationQueueTTL).UnixMilli(), nodeOperationHistoryTarget(req))
 	if err != nil {
 		return nodeops.Operation{}, err
 	}
@@ -293,7 +297,13 @@ func (s *Store) claimNodeOperation(ctx context.Context, tx *sql.Tx, agent string
 	}
 	req.Operation = id
 	deadline := now.Add(nodeOperationStartWindow + req.Action.Timeout())
-	if _, err := tx.ExecContext(ctx, `UPDATE node_operations SET state='running',expires_ms=? WHERE id=?`, deadline.UnixMilli(), id); err != nil {
+	expires := deadline
+	if action == nodeops.RegistryPull {
+		// A lost offer cannot start Docker. RegistryOperation extends this
+		// short deadline when the worker requests access, even for public images.
+		expires = now.Add(time.Minute)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE node_operations SET state='running',expires_ms=? WHERE id=?`, expires.UnixMilli(), id); err != nil {
 		return req, none, err
 	}
 	return req, deadline, nil
@@ -421,7 +431,7 @@ func (s *Store) GetNodeOperation(ctx context.Context, token, agent, id string, n
 		return op, err
 	}
 	var raw []byte
-	err = tx.QueryRowContext(ctx, `SELECT id,agent,generation,action,state,error,CASE WHEN created_ms>? THEN result END
+	err = tx.QueryRowContext(ctx, `SELECT id,agent,generation,action,state,error,CASE WHEN coalesce(completed_ms,created_ms)>? THEN result END
  FROM node_operations WHERE id=? AND agent=? AND (action NOT IN (?,?) OR actor=?)`, now.Add(-time.Hour).UnixMilli(), id, agent, nodeops.ContainerEditConfig, nodeops.ComposeSourceRead, actor).
 		Scan(&op.ID, &op.Agent, &op.Generation, &op.Action, &op.State, &op.Error, &raw)
 	if err != nil {

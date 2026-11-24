@@ -121,7 +121,7 @@ func startLocalExecution(ctx context.Context, mode, db, docker, secretRoot strin
 		} else {
 			closeDocker = closeClient
 		}
-		o.Inventory = localinv.New(docker).Overview
+		o.Inventory = localinv.New(docker).Refresh
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	prune := maintenance.Start(runCtx, "local ledger pruning failed", time.Hour, func(ctx context.Context) error { return book.Prune(ctx, time.Now().Add(-30*24*time.Hour)) })

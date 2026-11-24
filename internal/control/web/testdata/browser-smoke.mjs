@@ -641,6 +641,9 @@ try {
       window.imageCalls = [];
       window.imageRefreshReads = 0;
       const imageRefreshAt = new Date().toISOString();
+      const pullObserved = Date.parse(imageRefreshAt) + 120000;
+      const wallClock = Date.now;
+      let pullPolls = 0, postPullReads = 0;
       const operations = '/api/v1/nodes/%40local/operations';
       window.fetch = (path,options) => {
         if (path === '/api/v1/nodes/%40local/resources') return imageFetch(path,options).then(async response => {
@@ -654,6 +657,16 @@ try {
           // Agent clock is ahead of the browser and the delete reply has no observation timestamp.
           snapshot.overview.section_times = {...snapshot.overview.section_times,
             images:new Date(Date.parse(snapshot.updated_at)+60000).toISOString()};
+          if (pullPolls >= 2) {
+            // The first report after success began collecting before the pull completed.
+            const current = ++postPullReads > 1;
+            snapshot.updated_at = new Date(pullObserved + (current ? 1 : -1)).toISOString();
+            snapshot.overview.section_times.images = snapshot.updated_at;
+            if (current) {
+              snapshot.overview.images.push({full_id:'sha256:'+'f'.repeat(64),tags:['registry.example.test/team/app:v1'],container_count:0});
+              snapshot.overview.image_count++;
+            }
+          }
           return Response.json(snapshot);
         });
         if (path === '/api/v1/registries') return Promise.resolve(Response.json({items:[{
@@ -671,6 +684,16 @@ try {
         }
         if (path.startsWith(operations + '/image.')) {
           const action = path.split('/').at(-1);
+          if (action === 'image.pull') {
+            if (++pullPolls === 1) {
+              Date.now = () => wallClock() + 46000;
+              return Promise.resolve(Response.json({id:action,state:'running',action}));
+            }
+            Date.now = wallClock;
+            return Promise.resolve(Response.json({id:action,state:'succeeded',action,result:{
+              image:'registry.example.test/team/app:v1',resource_observed_at:new Date(pullObserved).toISOString()
+            }}));
+          }
           return Promise.resolve(Response.json({id:action,state:'succeeded',action,result:{images:['registry.example.test/team/app:stable']}}));
         }
         return imageFetch(path,options);
@@ -716,7 +739,10 @@ try {
     `);
     assert.equal(await evaluate('sharedPull.elements.registry_id.value'),'test-registry');
     await evaluate('sharedPull.requestSubmit()');
-    await until("document.getElementById('management-status').textContent.includes('操作成功')");
+    await until("document.getElementById('management-status').textContent.includes('Docker 正在拉取镜像')");
+    assert.equal(await evaluate("sharedPull.querySelector('button[type=submit]').disabled"),true);
+    await until("document.getElementById('management-status').textContent.includes('镜像拉取成功')");
+    await until("document.getElementById('resource-view').textContent.includes('registry.example.test/team/app:v1')");
     assert.deepEqual(await evaluate("imageCalls.find(item=>item.action === 'image.pull')"),{
       action:'image.pull',image:'registry.example.test/team/app:v1',registry_id:'test-registry',generation:1
     });

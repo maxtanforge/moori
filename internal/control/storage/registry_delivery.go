@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/maxtanforge/moori/internal/core/nodeops"
 	"github.com/maxtanforge/moori/internal/core/registry"
 	"github.com/maxtanforge/moori/internal/core/release"
 )
@@ -114,6 +115,13 @@ func (s *Store) RegistryOperation(ctx context.Context, key SecretKey, agent stri
 	cred, err := readRegistryCredential(ctx, tx, key, selected, secure)
 	if err != nil {
 		return registry.Credential{}, err
+	}
+	if request.Action == nodeops.RegistryPull {
+		// Bound the fence from submission so repeated credential reads cannot prolong it.
+		lifetime := nodeOperationQueueTTL + nodeOperationStartWindow + request.Action.Timeout()
+		if _, err := tx.ExecContext(ctx, "UPDATE node_operations SET expires_ms=created_ms+? WHERE id=?", lifetime.Milliseconds(), operationID); err != nil {
+			return registry.Credential{}, err
+		}
 	}
 	return cred, tx.Commit()
 }

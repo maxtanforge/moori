@@ -173,7 +173,7 @@ func run(ctx context.Context, args []string) error {
 		} else {
 			defer closeDocker()
 		}
-		client.Inventory = localinv.New(docker).Overview
+		client.Inventory = localinv.New(docker).Refresh
 	}
 	if u.Scheme == "wss" {
 		streams, err := logstream.NewClient(u, cfg, credential)
