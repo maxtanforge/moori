@@ -29,8 +29,8 @@ function send(method, params = {}, sessionId) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   const endpoint = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('browser startup timeout')), 10000);
     let output = '';
+    const timer = setTimeout(() => reject(new Error('browser startup timeout: ' + output.slice(-2000))), 25000);
     child.on('error', reject);
     child.stderr.on('data', chunk => {
       output += chunk;
