@@ -383,13 +383,16 @@ try {
       nodeSnapshot = structuredClone(nodeSnapshot);
       nodeSnapshot.overview.containers.find(item=>item.name==='test-web').ports = [{private:9000,protocol:'tcp'}];
       nodeSnapshot.overview.containers.find(item=>item.name==='edge-proxy').ports = [
-        {ip:'127.0.0.1',public:8080,private:80,protocol:'tcp'},
+        {ip:'::',public:8080,private:80,protocol:'tcp'},
+        {ip:'0.0.0.0',public:8080,private:80,protocol:'tcp'},
+        {ip:'::',public:8080,private:80,protocol:'udp'},
+        {ip:'127.0.0.1',public:8081,private:80,protocol:'tcp'},
         {ip:'2001:db8::1',public:5353,private:53,protocol:'udp'},
         {private:9999,protocol:'tcp'}
       ];
       renderWorkspaceBody();
     `);
-    const expectedPortMappings = ['127.0.0.1:8080 → 80/tcp','[2001:db8::1]:5353 → 53/udp'];
+    const expectedPortMappings = ['8080:80','[::]:8080:80/udp','127.0.0.1:8081:80','[2001:db8::1]:5353:53/udp'];
     const visiblePorts = selector => evaluate(`[...document.querySelectorAll('${selector}')].filter(el=>el.getClientRects().length).map(el=>el.textContent)`);
     assert.ok(await evaluate("[...document.querySelectorAll('.container-list th')].some(th=>th.innerText==='端口映射')"), 'desktop lists published ports in their own column');
     assert.deepEqual(await visiblePorts('.container-list .container-ports span'),expectedPortMappings);
@@ -1930,6 +1933,10 @@ try {
       document.getElementById('reload-node-directory').click();
     })`);
     await until("document.querySelector('[data-delete-node=retired-node]')");
+    assert.ok(await evaluate(`(() => {
+      const button = document.querySelector('[data-delete-node=retired-node]');
+      return button.querySelector('svg') && !button.textContent.trim() && button.title.includes('retired-node') && button.getAttribute('aria-label') === button.title;
+    })()`), 'directory delete icon identifies the node on hover and for assistive technology');
     assert.equal(await evaluate("document.querySelector('[data-delete-node=\"@local\"]') === null"),true);
     await evaluate("document.querySelector('[data-delete-node=retired-node]').click()");
     assert.match(await evaluate("document.getElementById('management-content').textContent"),/旧主机.*retired-node.*Token/);

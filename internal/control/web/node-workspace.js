@@ -1,4 +1,4 @@
-import {workspaceLink,workspaceText,uiIcon,option,workspaceGlyph,statusPill,routeHref,resourceTable,snapshotFacts,actionIcon,managementActions,dateTime,row,formatBytes,percent,bytePair,joined,formatContainerPort} from './ui-components.js';
+import {workspaceLink,workspaceText,uiIcon,option,workspaceGlyph,statusPill,routeHref,resourceTable,snapshotFacts,actionIcon,managementActions,dateTime,row,formatBytes,percent,bytePair,joined,publishedPortLabels} from './ui-components.js';
 import {stopContainerLogs,renderContainerLogs,nodeById,renderNodeOperationHistory,managementButton,containerLogsLink,containerTerminalLink,containerRemoveButton,composeRemoveButton,maintenanceOperationButton,performOperation,dialogOperationSurface,nodeOperationPath,operationStates,containerOperationMessage,operationPending,managementDialog,isMissingContainer,networkMaintenance,guardedResourceRemoval} from './management.js';
 import {stopContainerTerminal,renderContainerTerminal} from './terminal.js';
 import {openContainerWebhookSettings} from './webhook-management.js';
@@ -550,9 +550,8 @@ function nodeDeleteButton(id,generation) {
   const identity = name === id ? id : name + '（' + id + '）';
   const button = managementButton('删除',() => confirmNodeDeletion(id,generation,identity),true);
   button.dataset.deleteNode = id;
-  button.setAttribute('aria-label','删除节点 ' + identity);
   button.disabled = !generation || pendingNodeDeletions.has(id);
-  return button;
+  return actionIcon(button,'remove','删除节点 ' + identity);
 }
 
 function confirmNodeDeletion(id,generation,identity) {
@@ -861,9 +860,9 @@ function buildContainerList(id,view) {
     if (valid) nameCell.dataset.resourceFocus = target + ':details';
     const nameGroup = workspaceText('div','');
     nameGroup.append(nameCell);
-    const publishedPorts = (item.ports || []).filter(port => port.public);
+    const publishedPorts = publishedPortLabels(item.ports || []);
     const ports = workspaceText('div',publishedPorts.length ? '' : '—','container-ports');
-    for (const port of publishedPorts) ports.append(workspaceText('span',formatContainerPort(port)));
+    for (const label of publishedPorts) ports.append(workspaceText('span',label));
     if (publishedPorts.length) {
       const mobilePorts = ports.cloneNode(true);
       mobilePorts.className = 'container-ports-mobile';

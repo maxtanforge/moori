@@ -187,11 +187,35 @@ export function row(table, values) {
   element(table).append(tableRow(values, false));
 }
 
+function portHost(ip) {
+  if (!ip) return '';
+  return ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
+}
+
+export function publishedPortLabels(ports = []) {
+  const labels = new Map();
+  for (const port of ports) {
+    if (!port.public) continue;
+    const protocol = port.protocol || 'tcp';
+    const mapping = `${port.public}:${port.private}${protocol === 'tcp' ? '' : '/' + protocol}`;
+    const host = portHost(port.ip);
+    if (!host || host === '0.0.0.0') {
+      labels.set(mapping, mapping);
+    } else if (host === '[::]') {
+      // A companion IPv4 wildcard uses the same key, regardless of arrival order.
+      if (!labels.has(mapping)) labels.set(mapping, `[::]:${mapping}`);
+    } else {
+      const binding = `${host}:${mapping}`;
+      labels.set(binding, binding);
+    }
+  }
+  return [...labels.values()];
+}
+
 export function formatContainerPort(port) {
   const target = `${port.private}/${port.protocol}`;
   if (!port.public) return target;
-  const ip = port.ip || '';
-  const host = ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
+  const host = portHost(port.ip);
   return `${host ? host + ':' : ''}${port.public} → ${target}`;
 }
 
