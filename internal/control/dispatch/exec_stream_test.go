@@ -2,6 +2,8 @@ package dispatch
 
 import (
 	"crypto/tls"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -24,7 +26,7 @@ func TestExecStreamEndpointGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	token, _, err := store.IssueAgentCredential(ctx, "remote", time.Hour)
+	token, generation, err := store.IssueAgentCredential(ctx, "remote", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,12 +64,28 @@ func TestExecStreamEndpointGuards(t *testing.T) {
 		t.Fatalf("browser-style dial: %v", err)
 	}
 
-	// A valid relay connection is upgraded and claims nothing until a
-	// browser session arrives; dropping it releases the handler.
+	// A connected relay must lose its idle socket and its ability to
+	// reconnect when the administrator deletes this node.
 	conn, _, err := (&websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, HandshakeTimeout: 5 * time.Second}).
 		Dial("wss"+strings.TrimPrefix(tlsServer.URL, "https")+"/agent/v1/exec-stream", http.Header{"Authorization": {"Bearer " + token}})
 	if err != nil {
 		t.Fatalf("authenticated dial: %v", err)
 	}
-	_ = conn.Close()
+	defer conn.Close()
+	session, err := store.InitializeAdmin(ctx, "admin", "initial password", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteHumanAgent(ctx, session, "remote", generation); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = conn.ReadMessage()
+	var timeout net.Error
+	if err == nil || errors.As(err, &timeout) && timeout.Timeout() {
+		t.Fatalf("deleted node's existing relay stayed open: %v", err)
+	}
+	if err := dial(tlsServer, http.Header{"Authorization": {"Bearer " + token}}); err == nil {
+		t.Fatal("deleted node reconnected with original token")
+	}
 }

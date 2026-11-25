@@ -29,7 +29,9 @@ type Client struct {
 	// Inventory reports this machine's Docker resources and filesystem
 	// usage; the first report goes out right after connecting.
 	Inventory        func(context.Context) localinv.Overview
+	InventoryLists   func(context.Context) localinv.Overview
 	InventoryRefresh <-chan struct{}
+	WatchInventory   func(context.Context, chan<- struct{})
 	NodeOperation    func(context.Context, nodeops.Request) (nodeops.Result, error)
 }
 

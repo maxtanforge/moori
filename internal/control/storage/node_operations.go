@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -47,12 +48,14 @@ const activeOperationNode = `EXISTS (
   )
 )`
 
+const privateNodeOperationActions = `('container.replace','container.create','compose.source-create','compose.source-preview','compose.source-save','compose.source-deploy')`
+
 // Pre-restore operations must never be resent. A claimed mutation can still
 // be running on Docker, so keep its deadline as a node-wide fence.
 const retireRestoredNodeOperations = `DELETE FROM node_operation_capabilities WHERE EXISTS (SELECT 1 FROM recovery_state);
  UPDATE node_operations SET restore_fenced=(state='running' AND mutation=1),
  state=CASE WHEN state='running' AND mutation=1 THEN 'uncertain' ELSE 'failed' END,
- request=CASE WHEN action IN ('container.replace','container.create','compose.source-preview','compose.source-save','compose.source-deploy') THEN '{}' ELSE request END,
+ request=CASE WHEN action IN ` + privateNodeOperationActions + ` THEN '{}' ELSE request END,
  error=CASE WHEN state='running' AND mutation=1 THEN 'The result was lost during database restore. Refresh Docker resources before retrying.'
             ELSE 'The operation was invalidated by database restore.' END
  WHERE state IN ('queued','running') AND EXISTS (SELECT 1 FROM recovery_state);`
@@ -160,22 +163,32 @@ func (s *Store) queueNodeOperation(ctx context.Context, tx *sql.Tx, actor, agent
 	if err := retireExpiredNodeOperations(ctx, tx, agent, now); err != nil {
 		return op, err
 	}
-	if req.Action == nodeops.ContainerReplace || req.Action == nodeops.ContainerCreate || req.Action == nodeops.ContainerRelease || req.Action == nodeops.RegistryPull {
-		field, value := "$.target", req.Target
+	if req.Action == nodeops.ContainerReplace || req.Action == nodeops.ContainerCreate || req.Action == nodeops.ContainerRelease || req.Action == nodeops.ComposeSourceCreate || req.Action == nodeops.RegistryPull {
+		targetColumn, value := "json_extract(request,'$.target')", req.Target
+		if req.Action == nodeops.ComposeSourceCreate {
+			// Compose drafts are sealed, but the project is available to history.
+			targetColumn = "history_target"
+		}
 		if req.Action == nodeops.ContainerCreate || req.Action == nodeops.ContainerRelease {
-			field, value = "$.name", req.Name
+			targetColumn, value = "json_extract(request,'$.name')", req.Name
 		}
 		if req.Action == nodeops.RegistryPull {
-			field, value = "$.image", req.Image
+			targetColumn, value = "json_extract(request,'$.image')", req.Image
 		}
 		var previousActor string
 		var previousRequest []byte
 		err := tx.QueryRowContext(ctx, `SELECT id,state,actor,request FROM node_operations
- WHERE agent=? AND generation=? AND action=? AND json_extract(request,?)=?
- AND state IN ('queued','running') LIMIT 1`, agent, generation, req.Action, field, value).
+ WHERE agent=? AND generation=? AND action=? AND `+targetColumn+`=?
+ AND state IN ('queued','running') LIMIT 1`, agent, generation, req.Action, value).
 			Scan(&op.ID, &op.State, &previousActor, &previousRequest)
 		if err == nil {
-			if req.Action == nodeops.ContainerRelease || previousActor != actor || string(previousRequest) != string(request) {
+			if req.Action == nodeops.ComposeSourceCreate && previousActor == actor {
+				previousRequest, err = s.openComposeDraft(op.ID, previousRequest)
+				if err != nil {
+					return nodeops.Operation{}, ErrTargetBusy
+				}
+			}
+			if req.Action == nodeops.ContainerRelease || previousActor != actor || !bytes.Equal(previousRequest, request) {
 				return nodeops.Operation{}, ErrTargetBusy
 			}
 			op.Agent, op.Generation, op.Action = agent, generation, req.Action
@@ -393,7 +406,7 @@ func (s *Store) CompleteNodeOperation(ctx context.Context, agent string, generat
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE node_operations SET state=?,error=?,result=?,completed_ms=?,
  history_target=coalesce(nullif(?,''),history_target),
- request=CASE WHEN action IN ('container.replace','container.create','compose.source-preview','compose.source-save','compose.source-deploy') THEN ? ELSE request END WHERE id=?`,
+ request=CASE WHEN action IN `+privateNodeOperationActions+` THEN ? ELSE request END WHERE id=?`,
 			state, failure, encoded, now.UnixMilli(), historyName, historyRequest, id)
 		if err != nil {
 			return err
@@ -455,7 +468,7 @@ func (s *Store) GetNodeOperation(ctx context.Context, token, agent, id string, n
 func retireExpiredNodeOperations(ctx context.Context, tx *sql.Tx, agent string, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `UPDATE node_operations
  SET state=CASE WHEN state='running' AND mutation=1 THEN 'uncertain' ELSE 'failed' END,
-     request=CASE WHEN action IN ('container.replace','container.create','compose.source-preview','compose.source-save','compose.source-deploy') THEN '{}' ELSE request END,
+     request=CASE WHEN action IN `+privateNodeOperationActions+` THEN '{}' ELSE request END,
      error=CASE WHEN state='running' AND mutation=1 THEN ?
                 WHEN state='running' THEN 'The node did not return a result.'
                 ELSE 'The node did not accept the operation before it expired.' END

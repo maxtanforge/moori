@@ -1,6 +1,6 @@
 import {workspaceText,workspaceLink,field,optionField,managementActions,snapshotFacts,row,joined,dateTime} from './ui-components.js';
-import {managementButton,managedForm,nodeOperationPath,composeRemoveButton,containerOperationMessage,templatesPath,templateDeployment} from './management.js';
-import {workspaceNodeName,maintenanceTable,assertNodeManagementReady} from './node-workspace.js';
+import {managementButton,managedForm,performOperation,nodeOperationPath,composeRemoveButton,containerOperationMessage,templatesPath,templateDeployment} from './management.js';
+import {workspaceNodeName,maintenanceTable,nodePath,assertNodeManagementReady} from './node-workspace.js';
 import {lockEditorForm,showEditorPreview,showEditorForm,editorCard} from './maintenance-page.js';
 import {resourceChoiceOptions,editorRows} from './container-maintenance.js';
 import {enc,request,element,notice} from './api.js';
@@ -312,6 +312,41 @@ function composeRuntimeSummary(name,view) {
     table.firstElementChild.after(workspaceText('p','上次采集 ' + dateTime(sampled),'work-note resource-detail-note'));
   }
   return table;
+}
+
+export function createComposeProject(page,node) {
+  page.privateConfig = true;
+  const name = field('name','项目名称',{required:true,maxLength:128,autocomplete:'off',placeholder:'my-web'});
+  const source = field('compose','Compose YAML',{required:true,rows:18,spellcheck:false,
+    placeholder:'services:\n  web:\n    image: nginx:alpine\n'},'textarea');
+  const context = editorCard('部署到 ' + node.label,workspaceText('p',
+    '粘贴 compose.yaml 的内容。节点将校验配置、保存源文件并启动服务。','maintenance-scope'));
+  const form = managedForm([editorCard('项目配置',name,source)],'创建并部署',async data => {
+    const target = data.get('name').trim();
+    const content = data.get('compose');
+    if (!/^[a-z0-9][a-z0-9_-]{0,127}$/.test(target)) throw new Error('项目名须以小写字母或数字开头，可包含小写字母、数字、下划线和连字符。');
+    if (/^moori-[a-f0-9]{32}$/.test(target)) throw new Error('此名称为 Moori 部署保留，请选择其他项目名。');
+    if (!content.trim()) throw new Error('请填写 Compose YAML。');
+    if (new TextEncoder().encode(content).length > 65536) throw new Error('Compose YAML 超过 64 KiB。');
+    page.pending = true;
+    const unlock = lockEditorForm(form);
+    page.results.replaceChildren();
+    try {
+      const state = await performOperation(node,{action:'compose.source-create',target,
+        compose_source:{path:'compose.yaml',revision:'',content}},nodeOperationPath(node),page);
+      if (!page.visible()) return;
+      if (state === 'succeeded') {
+        page.completed = true;
+        form.hidden = true;
+        page.status.textContent = 'Compose 项目 ' + target + ' 已创建并部署。';
+        page.results.prepend(workspaceLink(nodePath(node.id,'compose',target,'edit'),'编辑 Compose 源文件','workspace-link'));
+      }
+    } finally {
+      page.pending = false;
+      if (!page.completed) unlock();
+    }
+  },() => page.visible() && !page.pending && !page.completed,page.status);
+  showEditorForm(page,context,form,workspaceText('section','','compose-preview'));
 }
 
 async function composeSourceOperation(page,node,name,action,edit,force = false) {

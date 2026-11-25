@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/maxtanforge/moori/internal/core/deployment"
@@ -31,11 +32,16 @@ var (
 //go:embed schema.sql
 var schema string
 
+//go:embed agent_identity_history.sql
+var agentIdentityHistory string
+
 //go:embed indexes.sql
 var indexes string
 
 type Store struct {
 	db              *sql.DB
+	agentSessionsMu sync.Mutex
+	agentSessions   map[*agentSession]struct{}
 	editResults     editConfigResults
 	agentIssueKey   [32]byte
 	composeDraftKey [32]byte
@@ -45,14 +51,14 @@ type Store struct {
 const controlApplicationID = 0x4d4f4f63
 
 // controlSchemaVersion counts the migrations applied after the initial schema.
-const controlSchemaVersion = 2
+const controlSchemaVersion = 3
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	db, err := sqlite.Open(ctx, path, controlApplicationID, schema, indexes)
+	db, err := sqlite.Open(ctx, path, controlApplicationID, schema, indexes, agentIdentityHistory)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, agentSessions: make(map[*agentSession]struct{})}
 	if _, err := rand.Read(s.agentIssueKey[:]); err != nil {
 		db.Close()
 		return nil, err

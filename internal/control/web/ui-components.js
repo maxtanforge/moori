@@ -187,6 +187,14 @@ export function row(table, values) {
   element(table).append(tableRow(values, false));
 }
 
+export function formatContainerPort(port) {
+  const target = `${port.private}/${port.protocol}`;
+  if (!port.public) return target;
+  const ip = port.ip || '';
+  const host = ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
+  return `${host ? host + ':' : ''}${port.public} → ${target}`;
+}
+
 export function joined(items) { return (items || []).join(' · ') || '—'; }
 export function dateTime(value) {
   if (!value || value === '0001-01-01T00:00:00Z') return '—';

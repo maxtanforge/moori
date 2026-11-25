@@ -58,6 +58,7 @@ func Mount(mux *http.ServeMux, store *storage.Store, views ViewOptions) {
 	mux.HandleFunc("POST /api/v1/auth/logout", h.guard(h.logout))
 	mux.HandleFunc("POST /api/v1/auth/password", h.guard(h.password))
 	mux.HandleFunc("GET /api/v1/projects", h.guard(h.projects))
+	mux.HandleFunc("DELETE /api/v1/agents/{agent}", h.guard(h.deleteAgent))
 	mux.HandleFunc("GET /api/v1/agents", h.guard(h.agents))
 	mux.HandleFunc("POST /api/v1/agents", h.guard(h.createAgentToken))
 	mux.HandleFunc("GET /api/v1/nodes/{agent}/resources", h.guard(h.agentResources))

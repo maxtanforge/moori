@@ -7,23 +7,12 @@ import (
 
 	"github.com/maxtanforge/moori/internal/control/storage"
 	"github.com/maxtanforge/moori/internal/core/nodeops"
-	"github.com/maxtanforge/moori/internal/transport/httpproxy"
+	"github.com/maxtanforge/moori/internal/transport/agentwire"
 	"github.com/maxtanforge/moori/internal/transport/imagearchive"
 )
 
 func ImageArchiveEndpoint(store *storage.Store, relay *imagearchive.Relay, proxies ...netip.Prefix) http.Handler {
-	authenticate := AuthenticateCredential(store)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		if !httpproxy.HTTPS(r, proxies) {
-			http.Error(w, "remote image archives require verified HTTPS", http.StatusUpgradeRequired)
-			return
-		}
-		peer, err := authenticate(r)
-		if err != nil {
-			http.Error(w, "Agent identity rejected", http.StatusUnauthorized)
-			return
-		}
+	return relayEndpoint(store, proxies, "remote image archives require verified HTTPS", func(w http.ResponseWriter, r *http.Request, peer agentwire.Peer) {
 		id := r.PathValue("operation")
 		request, err := store.RunningNodeOperation(r.Context(), peer.ID, peer.Generation, id, time.Now())
 		if err != nil {

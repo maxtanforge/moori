@@ -49,6 +49,7 @@ type Sources struct {
 	rootInfo fs.FileInfo
 	project  string
 	paths    []string
+	managed  bool
 }
 
 // Open resolves a project exclusively through the operator's source manifest.
@@ -56,15 +57,23 @@ func Open(root, manifest, name string) (*Sources, error) {
 	if root == "" || manifest == "" || !projectName.MatchString(name) {
 		return nil, ErrSourceUnavailable
 	}
-	if !filepath.IsAbs(root) || len(manifest) > 128<<10 {
+	if !filepath.IsAbs(root) {
 		return nil, ErrInvalidSource
 	}
+	projects, err := SourceManifest(manifest)
+	if err != nil {
+		return nil, err
+	}
+	return openPaths(root, name, projects[name])
+}
+
+// SourceManifest reads operator registrations, including projects with no running containers.
+func SourceManifest(manifest string) (map[string][]string, error) {
 	var projects map[string][]string
-	if json.Unmarshal([]byte(manifest), &projects) != nil {
+	if len(manifest) > 128<<10 || json.Unmarshal([]byte(manifest), &projects) != nil {
 		return nil, ErrInvalidSource
 	}
-	paths := projects[name]
-	return openPaths(root, name, paths)
+	return projects, nil
 }
 
 // OpenDiscovered resolves Compose's ordered absolute file paths within the

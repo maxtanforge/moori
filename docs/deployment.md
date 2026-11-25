@@ -35,7 +35,7 @@ moori serve
 
 主服务需要访问 `/var/run/docker.sock`，系统需提供 Docker CLI 和 Compose 插件。默认自动检测并接入本机，示例 Compose 无需额外启动参数。页面会显示 `local` 是否可用。需要显式控制时，可使用 `-local-execution on` 要求本机执行可用，否则启动报错；`off` 用于仅管理远程机器。
 
-平台管理员可以在控制台「运行环境」选择「本机 Docker」或任意已接入的 Agent，查看系统和硬件、文件系统、Docker 配置、容器用量、Compose 项目、镜像、网络和卷。采集随节点启动，运行期间周期更新。发现已有服务后可直接查看资源。
+平台管理员可以在控制台「运行环境」选择「本机 Docker」或任意已接入的 Agent，查看系统和硬件、文件系统、Docker 配置、容器用量、Compose 项目、镜像、网络和卷。采集随节点启动，Docker 变更事件会触发更新，节点也会定期核对。发现已有服务后可直接查看资源。
 
 容器示例把宿主机的 `/proc`、`/sys`、`/etc/os-release` 和 `/etc/hostname` 分别只读挂到 `/host` 下，并通过 `MOORI_HOST_ROOT=/host` 指定采集路径。原生 Linux 进程直接采集宿主机。容器可以枚举宿主机文件系统的挂载点，容量仅在节点能访问对应文件系统时显示。若需监控额外的文件系统，将该挂载点单独只读挂到 `/host` 下的对应位置，例如 `/srv/storage:/host/srv/storage:ro`。
 
@@ -75,6 +75,12 @@ moori-agent -endpoint ws://moori.internal:8080/agent/v1/connect -credential-file
 ```
 
 将 `moori.internal:8080` 替换为节点实际可达的主服务 IP 或域名及端口。Agent 默认在当前目录保存 `agent.db`、`agent.db.logs` 和 `agent.db.secrets`。每份凭证和账本仅运行一个 Agent 进程。
+
+### 删除远程节点
+
+平台管理员可在「运行环境」的节点列表中找到远程节点，点击「删除」并核对节点名称和标识。删除成功后，该节点从目录移除，已建立的 Agent 连接会断开，原 Token 随即失效。节点仍有排队或执行中的任务时，先等待任务结束再删除。本机 Docker 是内置节点，页面和接口均禁止删除。
+
+删除只影响 Moori 中的接入关系，宿主机上的容器、卷和 Agent 数据目录会保留。若以后重新接入同一台机器，须签发新 Token。单纯升级 Agent 时应保留原节点及 Token，按下文升级步骤操作。
 
 ## 绑定部署目标
 
@@ -134,6 +140,43 @@ docker compose --env-file .env -f deploy/compose.agent.example.yml up -d
 Agent 容器默认以 root 访问宿主 Docker socket。示例通过独立命名卷 `moori-agent-data:/data` 保存账本和日志。已有宿主目录的节点可使用 `/data/moori-agent:/data`，重建后继续使用原有的 `agent.db`。
 
 使用 Moori 文件型部署密钥时，可将专用密钥目录按相同绝对路径挂给 Agent，例如 `/srv/moori-secrets:/srv/moori-secrets`，并设置 `command: ["-secret-dir", "/srv/moori-secrets"]`。这样宿主 Docker 可以按 Agent 写入的路径读取文件。已有部署使用旧密钥目录时，保留其宿主路径，并将该目录按原路径挂载，启动和运行 `gc-secrets` 时均用 `-secret-dir` 指向该位置。
+
+## 升级远程 Agent
+
+升级远程节点时使用 `moori-agent` 镜像。升级前确认当前节点没有正在执行的操作，并保留原有的 Token、主服务连接地址、Docker socket 和 `/data` 挂载。使用凭证文件的节点沿用原文件。
+
+**v0.1.0 Agent 无法通过控制台的「替换容器」可靠地升级自身。** 它先创建新版容器，再停止旧容器。停止自己后，后续改名、启动和验证步骤可能中断。从远程宿主机按原部署方式升级。
+
+### 使用 docker run 的节点
+
+以容器名 `moori-agent` 为例，提前备好原来的 `docker run` 命令，保留其中的环境变量、挂载、网络和启动参数。若旧命令带 `--rm`，停止容器会自动删除它，需保留旧镜像标签和原启动参数以便回退。
+
+```bash
+docker pull ghcr.io/maxtanforge/moori-agent:0.2.0
+docker rename moori-agent moori-agent-old
+docker stop moori-agent-old
+```
+
+随后执行原 `docker run` 命令，沿用原容器名，仅把镜像换为 `ghcr.io/maxtanforge/moori-agent:0.2.0`。在控制台确认**原节点恢复在线**后，用 `docker rm moori-agent-old` 清理保留的旧容器。若新 Agent 未能接入，先停止新容器，再用 `docker start moori-agent-old` 启动保留的旧实例。
+
+### 使用 Compose 的节点
+
+在远程宿主机的原 Compose 项目中，把 Agent 服务的镜像标签改为目标版本。以下示例假设服务名为 `moori-agent`，使用自定义文件名或环境文件时沿用原来的 `-f`、`--env-file` 和项目名。
+
+```bash
+docker compose pull moori-agent
+docker compose up -d moori-agent
+```
+
+### 已从控制台尝试替换自身
+
+先在远程宿主机查看容器状态：
+
+```bash
+docker ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}'
+```
+
+如果原 Agent 已停止，且发现本次生成的 `moori-stage-*` 容器，核对它的镜像为目标版本的 **`moori-agent`**、状态为 `Created`，并确认它挂载了原 Agent 的数据卷。可用 `docker inspect --format '{{json .Mounts}}' <新版容器ID>` 查看挂载。确认后运行 `docker start <新版容器ID>`。等原节点恢复在线，再清理旧容器并将新版容器改回原名。如果没有对应的暂存容器，按上面的宿主机升级步骤操作。每份凭证和账本同时只运行一个 Agent。
 
 ## SQLite 文件打不开
 

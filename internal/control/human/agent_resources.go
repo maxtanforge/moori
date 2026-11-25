@@ -1,10 +1,13 @@
 package human
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/maxtanforge/moori/internal/control/storage"
@@ -47,6 +50,7 @@ func (h *handler) agentResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := agentResourcesView{Agent: id, DisplayName: name}
+	var inventory json.RawMessage
 	state := h.nodeState
 	if state == nil {
 		state = h.health
@@ -95,17 +99,43 @@ func (h *handler) agentResources(w http.ResponseWriter, r *http.Request) {
 		}
 		var overview localinv.Overview
 		if record.Generation == generation && len(record.Overview) > 0 && json.Unmarshal(record.Overview, &overview) == nil {
+			inventory = record.Overview
 			view.Available = true
 			view.Overview = &overview
 			view.Generation = generation
 			view.UpdatedAt = record.UpdatedAt
 			const maxAge = 2 * time.Minute
 			view.Stale = record.UpdatedAt == nil || now.Sub(*record.UpdatedAt) > maxAge ||
-				!overview.GeneratedAt.IsZero() && now.Sub(overview.GeneratedAt) > maxAge
+				now.Sub(overview.DockerSampledAt()) > maxAge
 			view.Message = ""
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	tag := resourceETag(view, inventory)
+	w.Header().Set("ETag", tag)
+	if view.LastContact != nil {
+		w.Header().Set("X-Moori-Last-Contact", view.LastContact.UTC().Format(time.RFC3339Nano))
+	}
+	for _, line := range r.Header.Values("If-None-Match") {
+		for candidate := range strings.SplitSeq(line, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "*" || strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(tag, "W/") {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(view)
+}
+
+// The weak validator covers the inventory bytes and all visible state except
+// the heartbeat timestamp, which travels in the headers on revalidation.
+func resourceETag(view agentResourcesView, inventory json.RawMessage) string {
+	view.Overview = nil
+	view.LastContact = nil
+	hash := sha256.New()
+	_ = json.NewEncoder(hash).Encode(view)
+	_, _ = hash.Write(inventory)
+	return `W/"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 }

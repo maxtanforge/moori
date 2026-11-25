@@ -1,7 +1,7 @@
 import {workspaceText,routeHref,workspaceLink} from './ui-components.js';
 import {nodeById,containerOperationMessage,isMissingContainer,managementButton,performOperation} from './management.js';
 import {nodePath,nodeManagementIssue} from './node-workspace.js';
-import {openMaintainedDeployment,maintenanceDeploymentPath,editComposeDeployment,editExistingCompose} from './compose-maintenance.js';
+import {openMaintainedDeployment,maintenanceDeploymentPath,editComposeDeployment,editExistingCompose,createComposeProject} from './compose-maintenance.js';
 import {editStandaloneContainer,readContainerConfiguration} from './container-maintenance.js';
 import {deploymentRunsPanel} from './ci-management.js';
 import {element,enc,notice,request} from './api.js';
@@ -58,7 +58,8 @@ export function renderMaintenancePage(route,key) {
   const page = {key,body,status,output,results,navigation,visible:() => maintenancePage === page && accountEpoch === account};
   maintenancePage = page;
   panel.append(main,navigation);
-  const title = route.mode === 'deployments' ? '部署记录' : route.mode === 'create' ? '部署容器' : route.mode === 'redeploy' ? '重新部署' :
+  const composeCreate = route.category === 'compose' && route.mode === 'create';
+  const title = composeCreate ? '创建 Compose 项目' : route.mode === 'deployments' ? '部署记录' : route.mode === 'create' ? '部署容器' : route.mode === 'redeploy' ? '重新部署' :
     route.category === 'containers' ? '编辑容器配置' : '修改 Compose 配置';
   element('maintenance-title').textContent = title;
   const back = element('maintenance-back');
@@ -81,7 +82,7 @@ export function renderMaintenancePage(route,key) {
   } else {
     if (route.container) page.containerList = nodePath(route.id,'containers');
     back.href = routeHref(route.returnPath || nodePath(route.id,route.category,route.container || route.resource));
-    back.textContent = route.mode === 'create' ? '返回容器列表' : '返回详情';
+    back.textContent = composeCreate ? '返回 Compose 项目列表' : route.mode === 'create' ? '返回容器列表' : '返回详情';
     status.textContent = route.mode === 'deployments' ? '正在读取资源…' : '正在读取当前节点配置…';
   }
 }
@@ -138,6 +139,12 @@ export function initializeNodeMaintenance(route,snapshot) {
         }
       },'正在读取当前容器配置…');
     }
+    return;
+  }
+  if (route.mode === 'create') {
+    page.initialized = true;
+    page.status.textContent = '';
+    createComposeProject(page,node);
     return;
   }
   const project = (view.compose_projects || []).find(item => item.name === route.resource);

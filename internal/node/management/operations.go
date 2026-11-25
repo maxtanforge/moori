@@ -4,6 +4,7 @@ package management
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/maxtanforge/moori/internal/core/nodeops"
@@ -15,11 +16,13 @@ import (
 )
 
 type Operations struct {
-	sourceDocker string
-	Archives     imagearchive.Endpoint
-	docker       *dockerops.Runner
-	images       *noderegistry.Engine
-	credentials  func(context.Context, string) (registry.Credential, error)
+	sourceDocker     string
+	managedRoot      string
+	composeLifecycle sync.Map
+	Archives         imagearchive.Endpoint
+	docker           *dockerops.Runner
+	images           *noderegistry.Engine
+	credentials      func(context.Context, string) (registry.Credential, error)
 }
 
 func Open(images *noderegistry.Engine, credentials func(context.Context, string) (registry.Credential, error)) (*Operations, error) {
@@ -41,6 +44,12 @@ func (o *Operations) TerminalStarter() execstream.Starter {
 }
 
 func (o *Operations) Run(ctx context.Context, req nodeops.Request) (nodeops.Result, error) {
+	if (req.Action.ComposeFileOperation() && req.Action.Mutates()) || req.Action == nodeops.ComposeRemove {
+		if _, busy := o.composeLifecycle.LoadOrStore(req.Target, struct{}{}); busy {
+			return nodeops.Result{}, errors.New("此 Compose 项目正在执行其他更改，请稍后重试")
+		}
+		defer o.composeLifecycle.Delete(req.Target)
+	}
 	if req.Action.ComposeFileOperation() {
 		return o.runComposeSource(ctx, req)
 	}

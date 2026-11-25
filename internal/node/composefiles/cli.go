@@ -3,13 +3,17 @@ package composefiles
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,12 +30,17 @@ func (s *Sources) Services(ctx context.Context, dockerPath string, snapshot Snap
 func (s *Sources) services(ctx context.Context, dockerPath string, snapshot Snapshot, run func(*exec.Cmd) error) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	cmd, cleanup, err := s.command(ctx, dockerPath, snapshot, "config", "--services")
+	args := []string{"config", "--services"}
+	output := serviceOutput{limit: 64 << 10}
+	if s.managed {
+		args = []string{"config", "--format", "json", "--no-path-resolution"}
+		output.limit = maxResultBytes
+	}
+	cmd, cleanup, err := s.command(ctx, dockerPath, snapshot, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
-	var output serviceOutput
 	cmd.Stdout = &output
 	if err := run(cmd); err != nil {
 		if ctx.Err() != nil {
@@ -39,7 +48,15 @@ func (s *Sources) services(ctx context.Context, dockerPath string, snapshot Snap
 		}
 		return nil, errors.New("Docker Compose 未通过整组源文件校验，请核对配置和变量")
 	}
-	names := strings.Fields(output.String())
+	var names []string
+	if s.managed {
+		names, err = managedServices(output.data.Bytes())
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		names = strings.Fields(output.data.String())
+	}
 	if len(names) > 512 {
 		return nil, errors.New("Docker Compose 返回的服务过多")
 	}
@@ -70,7 +87,11 @@ func (s *Sources) Apply(ctx context.Context, dockerPath, revision string, forceR
 }
 
 func (s *Sources) apply(ctx context.Context, dockerPath string, snapshot Snapshot, forceRecreate bool, run func(*exec.Cmd) (bool, error)) error {
-	ctx, cancel := context.WithTimeout(ctx, 125*time.Second)
+	timeout := 125 * time.Second
+	if s.managed {
+		timeout = 15 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	args := []string{"up", "--detach", "--no-build", "--pull", "missing", "--wait", "--wait-timeout", "120"}
 	if forceRecreate {
@@ -140,11 +161,35 @@ func (s *Sources) command(ctx context.Context, dockerPath string, snapshot Snaps
 	return cmd, cleanup, nil
 }
 
-type serviceOutput struct{ bytes.Buffer }
+// Inspect Compose's normalized mounts before the CLI resolves host paths inside
+// the Moori container. The Docker daemon may have a different filesystem.
+func managedServices(data []byte) ([]string, error) {
+	var model struct {
+		Services map[string]struct {
+			Volumes []struct{ Type, Source string }
+		}
+	}
+	if err := json.Unmarshal(data, &model); err != nil || model.Services == nil {
+		return nil, errors.New("Docker Compose 返回了无效的项目配置")
+	}
+	for _, service := range model.Services {
+		for _, mount := range service.Volumes {
+			if mount.Type == "bind" && !path.IsAbs(mount.Source) {
+				return nil, errors.New("绑定挂载请使用 Docker 宿主机绝对路径或命名卷")
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(model.Services)), nil
+}
+
+type serviceOutput struct {
+	data  bytes.Buffer
+	limit int
+}
 
 func (b *serviceOutput) Write(data []byte) (int, error) {
-	if len(data) > 64<<10-b.Len() {
+	if len(data) > b.limit-b.data.Len() {
 		return 0, errors.New("Docker Compose 服务列表过大")
 	}
-	return b.Buffer.Write(data)
+	return b.data.Write(data)
 }

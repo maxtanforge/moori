@@ -193,7 +193,7 @@ const operationLabels = {
   'container.create':'创建容器', 'container.start':'启动容器', 'container.stop':'停止容器',
   'container.restart':'重启容器', 'container.pause':'暂停容器', 'container.resume':'恢复容器',
   'container.resources':'更新资源限制', 'container.remove':'删除容器', 'container.replace':'重建容器', 'container.release':'发布容器',
-  'compose.remove':'删除 Compose 项目',
+  'compose.remove':'删除 Compose 项目', 'compose.source-create':'创建 Compose 项目',
   'compose.source-save':'保存 Compose 源文件', 'compose.source-deploy':'部署 Compose 源文件',
   'image.pull':'拉取镜像', 'image.tag':'标记镜像', 'image.delete':'删除镜像',
   'image.push':'推送镜像', 'image.import':'导入镜像',
@@ -209,7 +209,7 @@ const operationInventorySections = {
   'container.remove':['containers','networks','volumes'],
   'container.start':['containers'], 'container.stop':['containers'], 'container.restart':['containers'],
   'container.pause':['containers'], 'container.resume':['containers'],
-  'compose.remove':composeInventory,
+  'compose.remove':composeInventory, 'compose.source-create':composeInventory,
   'compose.source-deploy':composeInventory,
   'image.pull':['images'], 'image.tag':['images'], 'image.delete':['images'], 'image.import':['images'],
   'network.create':['networks'], 'network.delete':['networks'],
@@ -255,6 +255,13 @@ function applyConfirmedResourceOperation(node,command,job) {
       const network = result.network;
       if (network?.name === command.name && /^[a-f0-9]{64}$/.test(network.id)) {
         return rememberNodeResourceChange(node,'networks',network.id,network,observed || new Date().toISOString(),true);
+      }
+      break;
+    }
+    case 'compose.source-create': {
+      const services = result.compose_source?.after;
+      if (observed && Array.isArray(services)) {
+        return rememberNodeResourceChange(node,'compose_projects',command.target,{name:command.target,services},observed,true);
       }
       break;
     }
@@ -429,7 +436,9 @@ export async function performOperation(node, command, submitPath = nodeOperation
 
 export async function reportOperation(node, initial, surface) {
   const started = Date.now();
-  const pulling = (surface.command?.action || initial.action) === 'image.pull';
+  const action = surface.command?.action || initial.action;
+  const pulling = action === 'image.pull';
+  const longRunning = pulling || action === 'compose.source-create';
   let readFailures = 0;
   const path = nodeOperationPath(node) + '/' + enc(initial.id);
   let job = initial;
@@ -451,7 +460,7 @@ export async function reportOperation(node, initial, surface) {
         surface.status.textContent = stage + ' · 已等待 ' + elapsed + ' 秒。可关闭窗口，在操作记录中查看结果。';
       } else surface.status.textContent = job.state === 'queued' ? '等待节点领取操作…' : '节点正在执行…';
     }
-    if (!pulling && elapsed >= 45) {
+    if (!longRunning && elapsed >= 45) {
       if (!surface.visible()) return;
       const recheck = managementButton('继续查看结果',async () => {
         const latest = await request(path);
@@ -463,13 +472,13 @@ export async function reportOperation(node, initial, surface) {
       surface.status.textContent = '操作仍在执行，编号 ' + initial.id;
       return;
     }
-    await new Promise(resolve => setTimeout(resolve,pulling && (readFailures || elapsed >= 45) ? 2500 : 1000));
+    await new Promise(resolve => setTimeout(resolve,longRunning && (readFailures || elapsed >= 45) ? 2500 : 1000));
     if (account === accountEpoch && (recorded || surface.visible())) {
       try {
         job = await request(path,undefined,undefined,AbortSignal.timeout(5000));
         readFailures = 0;
       } catch (error) {
-        if (pulling && (!error.status || error.status >= 500) && ++readFailures <= 3) continue;
+        if (longRunning && (!error.status || error.status >= 500) && ++readFailures <= 3) continue;
         if (!recorded) throw error;
         if (surface.visible()) surface.status.textContent = '操作已提交，暂时无法读取结果。请到操作记录核查后再重试。';
         return;
@@ -496,7 +505,7 @@ export async function reportOperation(node, initial, surface) {
     return job.state;
   }
   const labels = {succeeded:'操作成功', failed:'操作失败', uncertain:'执行结果待核查'};
-  const result = pulling ? '' : job.result?.log ?? job.result?.container ?? job.result?.volume ?? job.result?.network ?? job.result ?? '';
+  const result = longRunning ? '' : job.result?.log ?? job.result?.container ?? job.result?.volume ?? job.result?.network ?? job.result ?? '';
   if (surface.output) {
     surface.output.textContent = typeof result === 'string' ? result : JSON.stringify(result,null,2);
     surface.output.hidden = !surface.output.textContent;

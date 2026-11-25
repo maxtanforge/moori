@@ -134,7 +134,11 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	defer operations.Close()
-	operations.EnableComposeSources(dockerPath)
+	projectRoot, err := filepath.Abs(filepath.Join(filepath.Dir(*db), "compose-projects"))
+	if err != nil {
+		return fmt.Errorf("resolve Compose project directory: %w", err)
+	}
+	operations.EnableComposeSources(dockerPath, projectRoot)
 	if u.Scheme == "wss" {
 		archives, err := imagearchive.NewClient(u, cfg, credential)
 		if err != nil {
@@ -173,7 +177,10 @@ func run(ctx context.Context, args []string) error {
 		} else {
 			defer closeDocker()
 		}
-		client.Inventory = localinv.New(docker).Refresh
+		inventory := localinv.New(docker)
+		client.Inventory = inventory.Refresh
+		client.InventoryLists = inventory.RefreshLists
+		client.WatchInventory = inventory.WatchChanges
 	}
 	if u.Scheme == "wss" {
 		streams, err := logstream.NewClient(u, cfg, credential)

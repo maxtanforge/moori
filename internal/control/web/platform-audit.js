@@ -16,6 +16,7 @@ const platformAuditActions = new Map([
   ['compose_template.version_created','创建 Compose 模板版本'],
   ['container.terminal','进入容器终端'],
   ['container.terminal.closed','退出容器终端'],
+  ['node.deleted','删除远程节点'],
   ['node.display_name_changed','修改节点显示名称'],
   ['platform.initialized','初始化平台'],
   ['platform_admin.changed','调整平台管理员权限'],

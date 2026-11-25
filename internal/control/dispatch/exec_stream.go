@@ -10,26 +10,15 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/maxtanforge/moori/internal/control/storage"
+	"github.com/maxtanforge/moori/internal/transport/agentwire"
 	"github.com/maxtanforge/moori/internal/transport/execstream"
-	"github.com/maxtanforge/moori/internal/transport/httpproxy"
 )
 
 // ExecStreamEndpoint upgrades node relay connections for the exec terminal
 // broker. Nodes authenticate with their bearer credential over verified
 // HTTPS; the control plane adds no buffering beyond frame relay.
 func ExecStreamEndpoint(store *storage.Store, broker *execstream.Broker, proxies ...netip.Prefix) http.Handler {
-	authenticate := AuthenticateCredential(store)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		if !httpproxy.HTTPS(r, proxies) {
-			http.Error(w, "remote terminals require verified HTTPS", http.StatusUpgradeRequired)
-			return
-		}
-		peer, err := authenticate(r)
-		if err != nil {
-			http.Error(w, "Agent identity rejected", http.StatusUnauthorized)
-			return
-		}
+	return relayEndpoint(store, proxies, "remote terminals require verified HTTPS", func(w http.ResponseWriter, r *http.Request, peer agentwire.Peer) {
 		upgrader := websocket.Upgrader{HandshakeTimeout: execstream.WriteTimeout}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {

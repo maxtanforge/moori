@@ -118,6 +118,34 @@ func TestCollectAggregatesCountsAndDiskUsage(t *testing.T) {
 	}
 }
 
+func TestVolumeReferencesRefreshIndependentlyOfCachedDiskUsage(t *testing.T) {
+	docker := fixture()
+	docker.volumes.Volumes[1].Mountpoint = "/volumes/pg-data"
+	docker.usage.Volumes = []*volume.Volume{{Name: "pg-data", UsageData: &volume.UsageData{Size: 72, RefCount: 1}}}
+	docker.containers = []container.Summary{{ID: "stopped", State: "exited", Mounts: []container.MountPoint{
+		{Type: "volume", Name: "pg-data"}, {Type: "volume", Source: "/volumes/pg-data"},
+		{Type: "bind", Source: "/volumes/pg-data"},
+	}}}
+	inv := New(docker)
+	check := func(want int64) {
+		t.Helper()
+		v := inv.Refresh(context.Background()).Volumes[1]
+		if v.RefCount == nil || *v.RefCount != want || !v.Known || v.Size != 72 {
+			t.Fatalf("expected %d references and cached size 72, got %+v", want, v)
+		}
+	}
+	check(1)
+	docker.containers = nil
+	check(0)
+	for i := 0; i < maxListedContainers; i++ {
+		docker.containers = append(docker.containers, container.Summary{Names: []string{"/a"}})
+	}
+	docker.containers = append(docker.containers, container.Summary{Names: []string{"/zzz"}, Mounts: []container.MountPoint{
+		{Type: "volume", Source: "/volumes/pg-data"},
+	}})
+	check(1)
+}
+
 func TestCollectKeepsDiskSizesIndependentOfDockerReport(t *testing.T) {
 	docker := fixture()
 	row := &container.Summary{ID: docker.containers[0].ID, SizeRw: 4 << 20}
@@ -148,6 +176,9 @@ func TestOverviewServesStaleSnapshotAfterFailure(t *testing.T) {
 	stale := inv.Overview(context.Background())
 	if !stale.Available || stale.Warning == "" {
 		t.Fatal("stale snapshot must stay available with a warning", stale)
+	}
+	if !stale.DockerSampledAt().Equal(warm.DockerSampledAt()) || !stale.SectionTimes["disk_usage"].Equal(warm.SectionTimes["disk_usage"]) {
+		t.Fatal("cached Docker sections acquired a new sample timestamp", stale.SectionTimes)
 	}
 	if stale.ContainerCount != warm.ContainerCount {
 		t.Fatal("stale snapshot lost data")
@@ -185,5 +216,33 @@ func TestRefreshSeesPulledImageWithinTTL(t *testing.T) {
 	}
 	if cached := inv.Overview(ctx); !cached.GeneratedAt.Equal(current.GeneratedAt) || cached.ImageCount != current.ImageCount {
 		t.Fatal("the next reader did not see the refreshed inventory")
+	}
+}
+
+func TestDiskCacheOnDaemonWithNoVolumes(t *testing.T) {
+	d := fixture()
+	d.usage.Volumes = nil
+	inv := New(d)
+	first := inv.Refresh(t.Context())
+	d.usage.LayersSize++
+	again := inv.Refresh(t.Context())
+	if first.DiskUsage.Layers != again.DiskUsage.Layers || first.SectionTimes["disk_usage"] != again.SectionTimes["disk_usage"] {
+		t.Fatal("empty volume list bypassed the disk sample cache")
+	}
+}
+
+func TestDockerSampleTimeFallsBackOnlyForAvailableLegacyInventory(t *testing.T) {
+	at := time.Now().UTC()
+	o := Overview{GeneratedAt: at}
+	if !o.DockerSampledAt().IsZero() {
+		t.Fatal("unavailable snapshot has a Docker sample time")
+	}
+	o.Available = true
+	if o.DockerSampledAt() != at {
+		t.Fatal("legacy snapshot lost its sample time")
+	}
+	o.SectionTimes = map[string]time.Time{"disk_usage": at, "host": at}
+	if !o.DockerSampledAt().IsZero() {
+		t.Fatal("host and disk reads refreshed the Docker resource lists")
 	}
 }

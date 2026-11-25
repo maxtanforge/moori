@@ -1,4 +1,4 @@
-import {workspaceLink,workspaceText,uiIcon,option,workspaceGlyph,statusPill,routeHref,resourceTable,snapshotFacts,actionIcon,managementActions,dateTime,row,formatBytes,percent,bytePair,joined} from './ui-components.js';
+import {workspaceLink,workspaceText,uiIcon,option,workspaceGlyph,statusPill,routeHref,resourceTable,snapshotFacts,actionIcon,managementActions,dateTime,row,formatBytes,percent,bytePair,joined,formatContainerPort} from './ui-components.js';
 import {stopContainerLogs,renderContainerLogs,nodeById,renderNodeOperationHistory,managementButton,containerLogsLink,containerTerminalLink,containerRemoveButton,composeRemoveButton,maintenanceOperationButton,performOperation,dialogOperationSurface,nodeOperationPath,operationStates,containerOperationMessage,operationPending,managementDialog,isMissingContainer,networkMaintenance,guardedResourceRemoval} from './management.js';
 import {stopContainerTerminal,renderContainerTerminal} from './terminal.js';
 import {openContainerWebhookSettings} from './webhook-management.js';
@@ -7,7 +7,7 @@ import {clearImageDetailEditor,imageUsage,imageManagementActions,buildImageTagPa
 import {initializeNodeMaintenance} from './maintenance-page.js';
 import {readContainerConfiguration} from './container-maintenance.js';
 import {enc,element,show,notice,trackPageRead,request} from './api.js';
-import {localExecution,action,detail,loadNodeResources,accountEpoch,platformAdmin,resourceGroups,selected,refreshAfterNodeMutation,containerRow} from './app.js';
+import {localExecution,action,detail,loadNodeResources,accountEpoch,platformAdmin,resourceGroups,selected,refreshAfterNodeMutation,containerRow,refreshAfterNodeDeletion,goToConsoleView} from './app.js';
 
 export const nodeCategories = [
   ['overview','节点概览'], ['containers','容器'], ['compose','Compose 项目'], ['images','镜像'],
@@ -24,6 +24,8 @@ const resourceCatalog = {
 };
 export const directoryHealth = new Map();
 let overviewTotals;
+export let nodeDirectoryRevision = 0;
+const pendingNodeDeletions = new Set();
 export const nodeDisplayNames = new Map();
 export let nodeNameRevision = 0;
 export let nodeRoute;
@@ -59,6 +61,7 @@ export function parseNodeRoute(value) {
     if (!nodeCategories.some(([key]) => key === category)) return null;
     if (target === undefined) return {id,category};
     if (category === 'containers' && target === 'new' && mode === undefined) return {id,category,mode:'create'};
+    if (category === 'compose' && target === 'new' && mode === 'create') return {id,category,mode:'create'};
     const logs = category === 'containers' && mode === 'logs';
     const term = category === 'containers' && mode === 'term';
     const monitor = category === 'containers' && mode === 'monitor';
@@ -81,6 +84,12 @@ export function parseNodeRoute(value) {
 
 export function workspaceNodeName(id) {
   return nodeDisplayNames.get(id) || (id === '@local' ? '本机 Docker' : id);
+}
+
+// An optimistic edit mutates the displayed inventory. Re-read the server
+// representation until the edit is confirmed or its local override expires.
+export function nodeSnapshotETag() {
+  return !nodeSnapshot?.read_failed && !nodeResourceChanges.size && nodeSnapshot?.etag;
 }
 
 export function setNodeSnapshot(snapshot) {
@@ -209,6 +218,9 @@ export function renderSidebarNode() {
 }
 
 export function resetNodeWorkspace() {
+  nodeDirectoryRevision++;
+  pendingNodeDeletions.clear();
+  overviewTotals = undefined;
   containerInlineOperation = undefined;
   nodeResourceChanges.clear();
   containerSelection.clear();
@@ -393,9 +405,10 @@ function applyNodeResourceChange(view,section,id,update,insert) {
 }
 
 export async function loadDirectoryHealth(after, version) {
+  const revision = nodeDirectoryRevision;
   try {
     const result = await request('/api/v1/monitor/nodes' + (after ? '?after=' + enc(after) : ''));
-    if (version !== accountEpoch) return;
+    if (version !== accountEpoch || revision !== nodeDirectoryRevision) return;
     for (const item of result.items || []) directoryHealth.set(item.agent,item);
     renderNodeDirectory();
     renderSidebarNode();
@@ -409,12 +422,15 @@ export async function loadDirectoryHealth(after, version) {
 export async function loadOverviewTotals() {
   if (!platformAdmin) return;
   const version = accountEpoch;
+  const revision = nodeDirectoryRevision;
+  let result;
   try {
-    overviewTotals = await request('/api/v1/overview');
+    result = await request('/api/v1/overview');
   } catch {
-    overviewTotals = undefined;
+    // Fall back to counts from the directory.
   }
-  if (version !== accountEpoch) return;
+  if (version !== accountEpoch || revision !== nodeDirectoryRevision) return;
+  overviewTotals = result;
   renderNodeDirectory();
 }
 
@@ -523,10 +539,71 @@ export function renderNodeDirectory() {
     row.append(identity,status,
       directoryMetric('最近联系',health?.last_contact ? dateTime(health.last_contact) : '—'),
       directoryMemory(health),
-      enter);
+      local ? enter : nodeDeleteButton(id,Number(option.dataset.generation)));
     entries.append(row);
   }
   list.append(entries);
+}
+
+function nodeDeleteButton(id,generation) {
+  const name = workspaceNodeName(id);
+  const identity = name === id ? id : name + '（' + id + '）';
+  const button = managementButton('删除',() => confirmNodeDeletion(id,generation,identity),true);
+  button.dataset.deleteNode = id;
+  button.setAttribute('aria-label','删除节点 ' + identity);
+  button.disabled = !generation || pendingNodeDeletions.has(id);
+  return button;
+}
+
+function confirmNodeDeletion(id,generation,identity) {
+  if (!platformAdmin || id === '@local' || !generation || pendingNodeDeletions.has(id)) return;
+  const dialog = element('management-dialog');
+  const version = accountEpoch;
+  const cancel = managementButton('取消',() => dialog.close());
+  const confirm = managementButton('确认删除',async () => {
+    if (pendingNodeDeletions.has(id) || version !== accountEpoch) return;
+    pendingNodeDeletions.add(id);
+    renderNodeDirectory();
+    cancel.disabled = true;
+    const current = () => dialog.open && confirm.isConnected;
+    element('management-status').textContent = '正在删除节点…';
+    try {
+      await request('/api/v1/agents/' + enc(id),{generation},undefined,undefined,'DELETE');
+    } catch (error) {
+      if (version === accountEpoch) {
+        const guidance = error.code === 'target_busy' ? '请等待正在执行或排队的任务结束后重试。' :
+          error.code === 'conflict' ? '请关闭此窗口并刷新节点列表，核对当前注册信息。' : '';
+        const message = '删除节点失败：' + error.message + (guidance ? ' ' + guidance : '');
+        if (current()) element('management-status').textContent = message;
+        else notice(message,'error');
+      }
+      return;
+    } finally {
+      if (version === accountEpoch) {
+        pendingNodeDeletions.delete(id);
+        cancel.disabled = false;
+        renderNodeDirectory();
+      }
+    }
+    if (version !== accountEpoch) return;
+    if (current()) dialog.close();
+    nodeDirectoryRevision++;
+    nodeNameRevision++;
+    nodeDisplayNames.delete(id);
+    directoryHealth.delete(id);
+    overviewTotals = undefined;
+    if (snapshotNode === id) {
+      snapshotNode = nodeSnapshot = undefined;
+      nodeResourceChanges.clear();
+      containerSelection.clear();
+    }
+    if (nodeRoute?.id === id) goToConsoleView('environments');
+    refreshAfterNodeDeletion(id);
+    notice('已删除节点 ' + identity + '。');
+  },true);
+  managementDialog('删除远程节点',
+    workspaceText('p','删除 ' + identity + ' 后，Agent Token 将失效，部署目标将解除绑定，节点的 Webhook 和镜像仓库授权将撤销。'),
+    managementActions(cancel,confirm));
 }
 
 function directoryMemory(health) {
@@ -593,6 +670,8 @@ export function renderWorkspaceBody() {
   show('create-network', manageable && category === 'networks');
   show('create-container', manageable && category === 'containers' && !container);
   if (category === 'containers' && !container) element('create-container').href = routeHref(nodePath(id,'containers','new'));
+  show('create-compose', manageable && category === 'compose' && !resource);
+  if (category === 'compose' && !resource) element('create-compose').href = routeHref(nodePath(id,'compose','new','create'));
   show('pull-image', manageable && category === 'images');
   show('import-image', manageable && category === 'images');
   element('resource-title').textContent = category === 'containers' ? '容器列表' : nodeCategories.find(([key]) => key === category)[1];
@@ -780,6 +859,16 @@ function buildContainerList(id,view) {
     nameCell.classList.add('container-name');
     nameCell.title = name;
     if (valid) nameCell.dataset.resourceFocus = target + ':details';
+    const nameGroup = workspaceText('div','');
+    nameGroup.append(nameCell);
+    const publishedPorts = (item.ports || []).filter(port => port.public);
+    const ports = workspaceText('div',publishedPorts.length ? '' : '—','container-ports');
+    for (const port of publishedPorts) ports.append(workspaceText('span',formatContainerPort(port)));
+    if (publishedPorts.length) {
+      const mobilePorts = ports.cloneNode(true);
+      mobilePorts.className = 'container-ports-mobile';
+      nameGroup.append(mobilePorts);
+    }
     const image = containerImage(item,view);
     const imageLabel = image ? resourceLink(id,'images',image,item.image || undefined) :
       workspaceText('span',item.image || '—');
@@ -803,10 +892,10 @@ function buildContainerList(id,view) {
       remove.classList.add('container-list-remove');
     }
     return [valid && manageable ? bulkSelectBox(item) : '',
-      nameCell,containerState(item),imageLabel,projectCell,percent(item.stats?.cpu_percent),formatBytes(item.stats?.memory_bytes),
+      nameGroup,containerState(item),imageLabel,projectCell,ports,percent(item.stats?.cpu_percent),formatBytes(item.stats?.memory_bytes),
       monitor ? managementActions(lifecycle,log,term,monitor,remove) : '—'];
   });
-  const table = resourceTable(['选择','名称','状态','镜像','Compose 项目','CPU','内存','操作'],rows);
+  const table = resourceTable(['选择','名称','状态','镜像','Compose 项目','端口映射','CPU','内存','操作'],rows);
   table.classList.add('container-list');
   table.dataset.node = id;
   const selectable = manageable ? items.filter(item => /^[0-9a-f]{64}$/.test(item.full_id || item.id)) : [];
@@ -1321,7 +1410,7 @@ function buildResourceList(id,category,view) {
 }
 
 function composeManagementPill(name) {
-  return /^moori-[a-f0-9]{32}$/.test(name) ? statusPill('Moori 管理','good') : statusPill('受限管理');
+  return /^moori-[a-f0-9]{32}$/.test(name) ? statusPill('Moori 管理','good') : statusPill('源文件项目');
 }
 
 function buildResourceDetail(id,category,key,view) {
@@ -1348,8 +1437,8 @@ function buildResourceDetail(id,category,key,view) {
     related = containers.filter(container => container.compose_project === item.name);
     facts = [['服务',joined(item.services)]];
     const managed = /^moori-[a-f0-9]{32}$/.test(item.name);
-    facts.push(['配置来源',managed ? 'Moori 部署版本' : '外部 Compose 项目']);
-    if (!managed) facts.push(['维护方式','在原部署工具管理。授权的 Compose 源文件可在这里查看和维护。']);
+    facts.push(['配置来源',managed ? 'Moori 部署版本' : 'Compose 源文件']);
+    if (!managed) facts.push(['维护方式','可在这里查看和维护节点已授权的 Compose 源文件。']);
     actions = managementActions(
       workspaceLink(nodePath(id,'compose',key,'edit'),managed ? '修改配置' : '查看 Compose 源文件','editor-link'),
       managed && workspaceLink(nodePath(id,'compose',key,'redeploy'),'重新部署','editor-link'),
@@ -1370,11 +1459,11 @@ function buildResourceDetail(id,category,key,view) {
     related = containers.filter(container => container.mounts?.some(mount => volumeMount(mount,item)));
     facts = [['驱动',item.driver],['范围',item.scope],['挂载点',item.mountpoint],
       ['类型',item.tmpfs ? 'tmpfs 临时内存卷' : '持久卷'],['已用空间',item.known ? formatBytes(item.size) : '—'],
-      ['容量上限',item.capacity_bytes ? formatBytes(item.capacity_bytes) : '—'],['Docker 引用数',item.ref_count]];
+      ['容量上限',item.capacity_bytes ? formatBytes(item.capacity_bytes) : '—'],['挂载容器数',item.ref_count ?? '未知']];
     const command = action => ({action:'volume.' + action,target:item.name});
     const references = Math.max(related.length,item.ref_count || 0);
     const blocked = item.scope && item.scope !== 'local' ? '非本机卷，不能在此删除。' : references ?
-      `仍有 ${references} 个容器引用。请先在下方核对容器，已停止的容器也会保留引用。` : '';
+      `仍有 ${references} 个容器引用。可通过「检查卷」核对当前挂载，已停止的容器也会保留引用。` : '';
     actions = managementActions(
       maintenanceOperationButton('检查卷',node,name,command('inspect')),
       guardedResourceRemoval('删除卷',node,name,command('delete'),'这会永久删除卷中的数据。Docker 会重新检查容器引用。',blocked)
@@ -1396,8 +1485,11 @@ function buildResourceDetail(id,category,key,view) {
     return [link,containerState(container),container.compose_service,container.image];
   });
   const hiddenReferences = category === 'volumes' && item.ref_count > rows.length;
-  const relationships = maintenanceTable('关联容器',['名称','状态','Compose 服务','镜像'],rows,hiddenReferences ? 'Docker 报告仍有引用，但当前快照未列出对应容器。' : '当前快照中无关联容器。');
+  const referenceNote = hiddenReferences
+    ? `快照记录了 ${item.ref_count} 个挂载容器，当前列出 ${rows.length} 个。可通过「检查卷」核对实时挂载。`
+    : category === 'volumes' && item.ref_count == null ? '挂载状态未知，可通过「检查卷」核对。' : '';
+  const relationships = maintenanceTable('关联容器',['名称','状态','Compose 服务','镜像'],rows,referenceNote || '当前快照中无关联容器。');
   page.append(summary,relationships);
-  if (hiddenReferences && rows.length) page.append(workspaceText('p','Docker 报告的引用数多于快照中列出的容器。','work-note'));
+  if (hiddenReferences && rows.length) page.append(workspaceText('p',referenceNote,'work-note'));
   return page;
 }

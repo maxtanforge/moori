@@ -64,7 +64,7 @@ func (s *Store) CompleteEnrollment(ctx context.Context, token string, csr [32]by
 		}
 		fingerprint := sha256.Sum256(certificate)
 		var active bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_certificates WHERE agent=? AND generation=1 AND fingerprint=?)`, agent, fingerprint[:]).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_certificates WHERE agent=? AND fingerprint=?)`, agent, fingerprint[:]).Scan(&active); err != nil {
 			return nil, err
 		}
 		if !active {
@@ -72,17 +72,21 @@ func (s *Store) CompleteEnrollment(ctx context.Context, token string, csr [32]by
 		}
 		return certificate, tx.Commit()
 	}
+	var generation int64
+	if err := tx.QueryRowContext(ctx, "SELECT "+nextAgentGeneration, agent).Scan(&generation); err != nil {
+		return nil, err
+	}
 	lineage := rand.Text()
-	certificate, err = sign(agent, 1, lineage)
+	certificate, err = sign(agent, generation, lineage)
 	if err != nil {
 		return nil, err
 	}
 	fingerprint := sha256.Sum256(certificate)
-	res, err := tx.ExecContext(ctx, `INSERT INTO agent_certificates(agent,generation,fingerprint) VALUES (?,1,?) ON CONFLICT(agent) DO NOTHING`, agent, fingerprint[:])
+	res, err := tx.ExecContext(ctx, `INSERT INTO agent_certificates(agent,generation,fingerprint) VALUES (?,?,?) ON CONFLICT(agent) DO NOTHING`, agent, generation, fingerprint[:])
 	if err := expectOne(res, err, ErrConflict); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_agent_identities VALUES (?,1,?)`, agent, lineage); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_agent_identities VALUES (?,?,?)`, agent, generation, lineage); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agent_enrollment_tokens SET csr_hash=?,certificate=? WHERE token_hash=?`, csr[:], certificate, hash[:]); err != nil {

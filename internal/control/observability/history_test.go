@@ -33,7 +33,10 @@ func TestMetricHistoryUsesMeasurementTimestamps(t *testing.T) {
 		{Name: "new", RxBytes: 90000, TxBytes: 90000}}
 	stats.SampledAt = at.Add(3 * time.Second)
 	stats.RxBytes, stats.TxBytes, stats.BlockReadBytes, stats.BlockWriteBytes = 450, 900, 1350, 1800
-	recordHistoryTestInventory(t, s, 1, overview, at.Add(4*time.Second))
+	// A list-only refresh superseded the full snapshot before it could be sent.
+	overview.SectionTimes["metrics"] = at
+	overview.GeneratedAt = at.Add(4 * time.Second)
+	recordHistoryTestInventory(t, s, 1, overview, overview.GeneratedAt)
 
 	// A failed inventory refresh copied the previous resource values verbatim.
 	recordHistoryTestInventory(t, s, 1, overview, at.Add(34*time.Second))

@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	ComposeSourceCreate  Action = "compose.source-create"
 	ComposeSourceRead    Action = "compose.source-read"
 	ComposeSourcePreview Action = "compose.source-preview"
 	ComposeSourceSave    Action = "compose.source-save"
@@ -33,7 +34,7 @@ type ComposeSourceResult struct {
 
 func (a Action) ComposeFileOperation() bool {
 	switch a {
-	case ComposeSourceRead, ComposeSourcePreview, ComposeSourceSave, ComposeSourceDeploy:
+	case ComposeSourceCreate, ComposeSourceRead, ComposeSourcePreview, ComposeSourceSave, ComposeSourceDeploy:
 		return true
 	default:
 		return false
@@ -51,9 +52,18 @@ func (r Request) validateComposeFile() error {
 		return nil
 	}
 	edit := r.ComposeSource
-	if r.Action == ComposeSourceRead || edit == nil || !fullID.MatchString(edit.Revision) ||
+	if r.Action == ComposeSourceRead || edit == nil ||
 		len(edit.Path) > 512 || !fs.ValidPath(edit.Path) || strings.ContainsAny(edit.Path, "\\:") ||
 		len(edit.Content) == 0 || len(edit.Content) > MaxComposeBytes/4 {
+		return ErrInvalid
+	}
+	if r.Action == ComposeSourceCreate {
+		if edit.Path != "compose.yaml" || edit.Revision != "" || r.Timestamps || r.AllLogRuns {
+			return ErrInvalid
+		}
+		return nil
+	}
+	if !fullID.MatchString(edit.Revision) {
 		return ErrInvalid
 	}
 	if ext := path.Ext(edit.Path); ext != ".yaml" && ext != ".yml" {

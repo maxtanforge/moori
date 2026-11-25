@@ -87,4 +87,31 @@ func TestCreateAgentTokenWithoutDeploymentTarget(t *testing.T) {
 		t.Fatal("retry changed the issued token")
 	}
 	call("POST", agents, admin, "https://control", retryBody, 409, strings.Repeat("b", 64))
+	const precondition = `{"generation":1}`
+	call("DELETE", agents+"/edge-2", viewer, "https://control", precondition, 403)
+	call("DELETE", agents+"/edge-2", admin, "https://other", precondition, 403)
+	call("DELETE", agents+"/@local", admin, "https://control", precondition, 400)
+	call("DELETE", agents+"/edge-2", admin, "https://control", `{"generation":2}`, 409)
+	call("DELETE", agents+"/edge-2", admin, "https://control", precondition, 204)
+	call("DELETE", agents+"/edge-2", admin, "https://control", precondition, 404)
+	call("POST", agents, admin, "https://control", retryBody, 409, key)
+	call("POST", agents, admin, "https://control", retryBody, 409, strings.ToUpper(key))
+	if page := call("GET", agents, admin, "https://control", "", 200); strings.Contains(page.Body.String(), "edge-2") {
+		t.Fatal("deleted node appeared in directory")
+	}
+	replacement := call("POST", agents, admin, "https://control", retryBody, 201, strings.Repeat("b", 64))
+	if !strings.Contains(replacement.Body.String(), `"generation":2`) {
+		t.Fatal("replacement reused original generation")
+	}
+	if retry := call("POST", agents, admin, "https://control", retryBody, 201, strings.Repeat("b", 64)); replacement.Body.String() != retry.Body.String() {
+		t.Fatal("replacement enrollment retry rotated token")
+	}
+	call("DELETE", agents+"/edge-2", admin, "https://control", precondition, 409)
+	call("DELETE", agents+"/edge-1", admin, "https://control", precondition, 204)
+	if _, _, err := s.AuthenticateAgentCredential(ctx, issued.Token); err == nil {
+		t.Fatal("deleted Agent token authenticated")
+	}
+	if _, _, err := s.ReadHumanTargetAgent(ctx, admin, "app", "prod"); err == nil {
+		t.Fatal("deleted node retained a target")
+	}
 }

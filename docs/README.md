@@ -6,7 +6,7 @@
 | --- | --- |
 | [系统架构](architecture.md) | 进程边界、代码分层、数据存储、执行链路 |
 | [部署模型与设计](design.md) | 发布、维护模式、执行快照、会话和恢复语义 |
-| [部署指南](deployment.md) | 数据目录、管理员初始化、Agent 凭证和容器部署 |
+| [部署指南](deployment.md) | 数据目录、管理员初始化、Agent 接入与删除、容器部署、升级与中断恢复 |
 | [运行要求](compatibility.md) | 构建工具、运行依赖与升级边界 |
 | [发布指南](release.md) | 二进制、镜像和版本产物 |
 | [CI 与 Gitea 接入](integrations.md) | 多目标 CI Token、Runner 直连部署、Compose 发布、独立容器版本更新与可选 Webhook |

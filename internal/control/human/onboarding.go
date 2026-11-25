@@ -58,3 +58,26 @@ func (h *handler) provisionTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (h *handler) deleteAgent(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Generation int64 `json:"generation"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	err := h.store.DeleteHumanAgent(r.Context(), h.getSession(r), r.PathValue("agent"), in.Generation)
+	if errors.Is(err, storage.ErrTargetBusy) {
+		writeErrorEnvelope(w, http.StatusConflict, "target_busy", "节点仍有待处理或执行中的任务，请处理完成后再删除。")
+		return
+	}
+	if errors.Is(err, storage.ErrConflict) {
+		writeErrorEnvelope(w, http.StatusConflict, "conflict", "节点身份已更新，请刷新后重试。")
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

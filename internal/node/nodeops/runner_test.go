@@ -87,12 +87,16 @@ func (d *guardedDocker) NetworkConnect(context.Context, string, string, *network
 }
 
 func (d *guardedDocker) VolumeInspect(_ context.Context, name string) (volume.Volume, error) {
-	return volume.Volume{Name: name, Driver: "local", Scope: "local"}, nil
+	return volume.Volume{Name: name, Driver: "local", Scope: "local", Mountpoint: "/volumes/" + name}, nil
 }
 
 func (d *guardedDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
 	d.listAll = opts.All
-	return []container.Summary{{ID: d.containerID, Mounts: []container.MountPoint{{Name: "persistent_data"}}}}, nil
+	return []container.Summary{
+		{ID: d.containerID, Mounts: []container.MountPoint{{Type: "volume", Name: "persistent_data"}}},
+		{ID: "unnamed-mount", Mounts: []container.MountPoint{{Type: "volume", Source: "/volumes/persistent_data"}}},
+		{ID: "bind-mount", Mounts: []container.MountPoint{{Type: "bind", Source: "/volumes/persistent_data"}}},
+	}, nil
 }
 
 func (d *guardedDocker) VolumeRemove(context.Context, string, bool) error {
@@ -113,6 +117,14 @@ func TestComposeNetworkChangeDoesNotReachDocker(t *testing.T) {
 	_, err := (Runner{Docker: daemon}).Run(context.Background(), nodeops.Request{Action: nodeops.NetworkConnect, Target: daemon.networkID, Container: daemon.containerID})
 	if err == nil || daemon.called != "" {
 		t.Fatalf("err=%v docker mutation=%q", err, daemon.called)
+	}
+}
+
+func TestVolumeInspectMatchesUnnamedVolumeMounts(t *testing.T) {
+	daemon := &guardedDocker{containerID: strings.Repeat("a", 64)}
+	result, err := (Runner{Docker: daemon}).Run(context.Background(), nodeops.Request{Action: nodeops.VolumeInspect, Target: "persistent_data"})
+	if err != nil || result.Volume == nil || result.Volume.RefCount != 2 || result.Volume.References[1].ID != "unnamed-mount" {
+		t.Fatalf("unexpected mount references: %+v, error: %v", result.Volume, err)
 	}
 }
 

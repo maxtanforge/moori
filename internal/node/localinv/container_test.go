@@ -82,3 +82,30 @@ func TestRepeatedContainerSamplesAndInspectFailure(t *testing.T) {
 		t.Fatalf("stopped container inherited old health: %+v", stopped)
 	}
 }
+
+func TestListRefreshSkipsHeavySamplesAndPreservesTheirValues(t *testing.T) {
+	d := &inspectFixture{fakeDocker: fixture()}
+	d.containers = d.containers[:1]
+	d.usage.Containers[0].ID = d.containers[0].ID
+	d.raw.Read = time.Now().UTC()
+	inv := New(d)
+	before := inv.Refresh(t.Context())
+	d.containers[0].Names = []string{"/renamed"}
+	d.containers[0].Status = "Up 1 minute (unhealthy)"
+	d.failed = true
+	inv.disk.at = inv.disk.at.Add(-2 * diskReuseWindow)
+	d.usage.LayersSize++
+	after := inv.RefreshLists(t.Context())
+	c := after.Containers[0]
+	if after.Warning != "" || c.Name != "renamed" || c.Health != "unhealthy" || c.Stats != before.Containers[0].Stats || c.ConfigSampledAt != before.Containers[0].ConfigSampledAt || c.WritableBytes == nil {
+		t.Fatal(after)
+	}
+	for _, key := range []string{"host", "filesystems", "engine", "disk_usage"} {
+		if before.SectionTimes[key] != after.SectionTimes[key] {
+			t.Fatalf("list refresh resampled %s", key)
+		}
+	}
+	if before.DiskUsage.Layers != after.DiskUsage.Layers || !after.DockerSampledAt().After(before.DockerSampledAt()) {
+		t.Fatal(after)
+	}
+}

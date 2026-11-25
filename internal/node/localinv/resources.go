@@ -109,15 +109,46 @@ func volumeRows(rows volume.ListResponse, usage []*volume.Volume) []Volume {
 				item.Size = u.Size
 				item.Known = true
 			}
-			if u.RefCount >= 0 {
-				item.RefCount = &u.RefCount
-			}
 		}
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return clip(out, maxListedVolumes)
 }
+
+// Count containers before their display list is clipped. Disk usage can be
+// cached across container changes and is used only for sizes.
+func setVolumeReferences(volumes []Volume, containers []container.Summary) {
+	byMountpoint := make(map[string]string, len(volumes))
+	for _, v := range volumes {
+		if v.Mountpoint != "" {
+			byMountpoint[v.Mountpoint] = v.Name
+		}
+	}
+	counts := make(map[string]int64, len(volumes))
+	seen := make(map[string]bool)
+	for _, c := range containers {
+		clear(seen)
+		for _, m := range c.Mounts {
+			if m.Type != "volume" {
+				continue
+			}
+			name := m.Name
+			if name == "" {
+				name = byMountpoint[m.Source]
+			}
+			if name != "" && !seen[name] {
+				counts[name]++
+				seen[name] = true
+			}
+		}
+	}
+	for i := range volumes {
+		count := counts[volumes[i].Name]
+		volumes[i].RefCount = &count
+	}
+}
+
 func diskTotals(usage types.DiskUsage) *DiskUsage {
 	o := &DiskUsage{Layers: usage.LayersSize}
 	for _, v := range usage.Containers {
@@ -151,7 +182,7 @@ type detailAPI interface {
 	ContainerStatsOneShot(context.Context, string) (container.StatsResponseReader, error)
 }
 
-func containerRows(ctx context.Context, d Docker, rows []container.Summary, previous []Container) ([]Container, int, []ComposeProject, string) {
+func containerRows(ctx context.Context, d Docker, rows []container.Summary, previous []Container, listsOnly bool) ([]Container, int, []ComposeProject, string) {
 	services := map[string]map[string]bool{}
 	running := 0
 	out := make([]Container, 0, len(rows))
@@ -192,27 +223,35 @@ func containerRows(ctx context.Context, d Docker, rows []container.Summary, prev
 		projects = append(projects, ComposeProject{Name: name, Services: slices.Sorted(maps.Keys(services[name]))})
 	}
 	warning := ""
-	if api, ok := d.(detailAPI); ok {
-		old := map[string]Container{}
-		for _, r := range previous {
-			old[r.FullID] = r
-		}
-		for idx := range out {
-			c := &out[idx]
-			prev := old[c.FullID]
-			c.WritableBytes = prev.WritableBytes
-			c.ConfigSampledAt = prev.ConfigSampledAt
-			c.RestartPolicy = prev.RestartPolicy
-			c.NanoCPUs = prev.NanoCPUs
-			c.PIDsLimit = prev.PIDsLimit
-			c.MemoryLimitBytes = prev.MemoryLimitBytes
-			if c.State == "running" {
-				if prev.State == "running" {
-					c.Health = prev.Health
-				}
-				c.Stats = prev.Stats
+	old := map[string]Container{}
+	for _, r := range previous {
+		old[r.FullID] = r
+	}
+	for idx := range out {
+		c := &out[idx]
+		prev := old[c.FullID]
+		c.WritableBytes = prev.WritableBytes
+		c.ConfigSampledAt = prev.ConfigSampledAt
+		c.RestartPolicy = prev.RestartPolicy
+		c.NanoCPUs = prev.NanoCPUs
+		c.PIDsLimit = prev.PIDsLimit
+		c.MemoryLimitBytes = prev.MemoryLimitBytes
+		if c.State == "running" {
+			if prev.State == "running" {
+				c.Health = prev.Health
 			}
+			switch {
+			case strings.HasSuffix(c.Status, " (unhealthy)"):
+				c.Health = "unhealthy"
+			case strings.HasSuffix(c.Status, " (healthy)"):
+				c.Health = "healthy"
+			case strings.HasSuffix(c.Status, " (health: starting)"):
+				c.Health = "starting"
+			}
+			c.Stats = prev.Stats
 		}
+	}
+	if api, ok := d.(detailAPI); ok && !listsOnly {
 		var misses atomic.Int64
 		var wg sync.WaitGroup
 		jobs := make(chan int)

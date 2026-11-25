@@ -97,7 +97,7 @@ func startLocalExecution(ctx context.Context, mode, db, docker, secretRoot strin
 		return inactive, err
 	}
 	operations.Archives = o.ImageArchives
-	operations.EnableComposeSources(dockerPath)
+	operations.EnableComposeSources(dockerPath, filepath.Join(filepath.Dir(path), "compose-projects"))
 	o.NodeOperation = operations.Run
 	o.PullImage = imageEngine.Pull
 	o.Ledger = book
@@ -113,6 +113,7 @@ func startLocalExecution(ctx context.Context, mode, db, docker, secretRoot strin
 	if o.Health != nil {
 		o.Collect = hostmetrics.New(filepath.Dir(path)).Sample
 	}
+	var inventory *localinv.Inventory
 	closeDocker := func() {}
 	if o.Health != nil || o.NodeState != nil {
 		docker, closeClient, err := localinv.Dial()
@@ -121,13 +122,18 @@ func startLocalExecution(ctx context.Context, mode, db, docker, secretRoot strin
 		} else {
 			closeDocker = closeClient
 		}
-		o.Inventory = localinv.New(docker).Refresh
+		inventory = localinv.New(docker)
+		o.Inventory = inventory.Refresh
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	prune := maintenance.Start(runCtx, "local ledger pruning failed", time.Hour, func(ctx context.Context) error { return book.Prune(ctx, time.Now().Add(-30*24*time.Hour)) })
 	finished := make(chan struct{})
 	done := make(chan error, 1)
 	client := localexec.NewClient(o)
+	if inventory != nil {
+		client.InventoryLists = inventory.RefreshLists
+		client.WatchInventory = inventory.WatchChanges
+	}
 	refresh := make(chan struct{}, 1)
 	client.InventoryRefresh = refresh
 	runOperation := func(ctx context.Context, req nodeops.Request) (nodeops.Result, error) {

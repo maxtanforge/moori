@@ -31,7 +31,20 @@ export async function request(path, body, key, signal, method) {
   }
   if (key) options.headers['Idempotency-Key'] = key;
   const response = await fetch(path, options);
-  if (response.status === 401) unauthorizedHandler();
+  return readJSON(response);
+}
+
+// Keep authorization errors on the shared path, and let obsolete polls from a
+// previous account finish without signing out the new session.
+export async function requestNodeResources(path, etag, signal, currentAccount) {
+  const response = await fetch(path, {mode:'same-origin',credentials:'same-origin',redirect:'error',cache:'no-store',
+    headers:etag ? {'If-None-Match':etag} : {},signal});
+  if (etag && response.status === 304) return {unchanged:true,lastContact:response.headers.get('X-Moori-Last-Contact')};
+  return {data:await readJSON(response,currentAccount),etag:response.headers.get('ETag')};
+}
+
+async function readJSON(response, currentAccount = () => true) {
+  if (response.status === 401 && currentAccount()) unauthorizedHandler();
   if (!response.ok) {
     const raw = (await response.text()).trim();
     const error = new Error(raw || `HTTP ${response.status}`);

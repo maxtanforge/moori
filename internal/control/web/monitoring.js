@@ -97,6 +97,19 @@ import {element,enc,request} from './api.js';
     return ticks.map(value => clock.format(value * 1000));
   }
 
+  function valueAxisSize(plot, labels, axisIndex) {
+    if (!labels?.length) return 50;
+    const axis = plot.axes[axisIndex];
+    const ctx = plot.ctx;
+    ctx.save();
+    // uPlot draws with a device-pixel font but expects the axis size in CSS pixels.
+    ctx.font = axis.font[0];
+    let width = 0;
+    for (const label of labels) width = Math.max(width, ctx.measureText(label).width);
+    ctx.restore();
+    return Math.ceil(width / uPlot.pxRatio) + axis.ticks.size + axis.gap + 4;
+  }
+
   function renderHistory(data) {
     const events = data.events || [];
     renderEvents(events);
@@ -276,7 +289,7 @@ import {element,enc,request} from './api.js';
         {stroke: palette.text, ticks: {stroke: palette.line, size: 4}, grid: {stroke: palette.grid, width: 1},
           border: {show: true, stroke: palette.line}, values: chartTicks, size: 30},
         {stroke: palette.text, ticks: {stroke: palette.line, size: 4}, grid: {stroke: palette.grid, width: 1},
-          border: {show: false}, values: (u, ticks) => ticks.map(value => metric.format(value))},
+          border: {show: false}, size: valueAxisSize, values: (u, ticks) => ticks.map(value => metric.format(value))},
       ],
       legend: {show: false},
       plugins: [eventMarkerPlugin(events, from / 1000, until / 1000, palette, holder),

@@ -161,6 +161,21 @@ type Overview struct {
 	Filesystems     []Filesystem         `json:"filesystems,omitempty"`
 }
 
+// DockerSampledAt is the most recent successful Docker resource list read.
+// Older agents omitted section timestamps and reported only GeneratedAt.
+func (o Overview) DockerSampledAt() time.Time {
+	if o.Available && o.SectionTimes == nil {
+		return o.GeneratedAt
+	}
+	var latest time.Time
+	for _, key := range []string{"containers", "images", "networks", "volumes"} {
+		if at := o.SectionTimes[key]; at.After(latest) {
+			latest = at
+		}
+	}
+	return latest
+}
+
 // List caps keep one snapshot an order of magnitude below the agentwire
 // frame limit even on busy daemons.
 const (
@@ -194,15 +209,21 @@ func (i *Inventory) Prefetch(ctx context.Context) { i.Overview(ctx) }
 
 // Overview refreshes once per TTL, even when multiple callers poll together.
 func (i *Inventory) Overview(ctx context.Context) Overview {
-	return i.overview(ctx, false)
+	return i.overview(ctx, false, false)
 }
 
 // Refresh collects a new snapshot even when a mutation follows a recent sample.
 func (i *Inventory) Refresh(ctx context.Context) Overview {
-	return i.overview(ctx, true)
+	return i.overview(ctx, true, false)
 }
 
-func (i *Inventory) overview(ctx context.Context, force bool) Overview {
+// RefreshLists reconciles Docker changes while keeping the last periodic
+// samples of host, disk usage, container configuration, and runtime metrics.
+func (i *Inventory) RefreshLists(ctx context.Context) Overview {
+	return i.overview(ctx, true, true)
+}
+
+func (i *Inventory) overview(ctx context.Context, force, listsOnly bool) Overview {
 	ctx, cancel := context.WithTimeout(ctx, i.timeout)
 	defer cancel()
 	select {
@@ -223,7 +244,7 @@ func (i *Inventory) overview(ctx context.Context, force bool) Overview {
 	if fresh && !force {
 		return *prev
 	}
-	o := refresh(ctx, i.docker, prev, &i.disk)
+	o := refresh(ctx, i.docker, prev, &i.disk, listsOnly)
 	i.mu.Lock()
 	i.cache = &o
 	i.fetched = time.Now()
@@ -232,7 +253,7 @@ func (i *Inventory) overview(ctx context.Context, force bool) Overview {
 }
 
 func collect(ctx context.Context, d Docker) (Overview, error) {
-	o := refresh(ctx, d, nil, &diskState{})
+	o := refresh(ctx, d, nil, &diskState{}, false)
 	if !o.Available {
 		return o, errors.New("Docker inventory unavailable")
 	}
@@ -251,19 +272,7 @@ type diskState struct {
 
 const diskReuseWindow = 5 * time.Minute
 
-func (s *diskState) reuse(now time.Time) (types.DiskUsage, bool) {
-	if !s.at.IsZero() && now.Sub(s.at) < diskReuseWindow && s.usage.Volumes != nil {
-		return s.usage, true
-	}
-	return types.DiskUsage{}, false
-}
-
-func (s *diskState) keep(usage types.DiskUsage, at time.Time) {
-	s.usage = usage
-	s.at = at
-}
-
-func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Overview {
+func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState, listsOnly bool) Overview {
 	o := Overview{}
 	if prev != nil {
 		o = *prev
@@ -276,18 +285,21 @@ func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Ove
 	o.GeneratedAt = now
 	o.Warning = ""
 	o.Message = ""
-	host, filesystems, fsOK, hostErr := sampleHost(now, o.Host)
-	if hostErr == nil {
-		o.Host = host
-		o.SectionTimes["host"] = now
-	} else {
-		o.warn("主机信息读取失败：" + hostErr.Error())
-	}
-	if fsOK {
-		o.Filesystems = filesystems
-		o.SectionTimes["filesystems"] = now
-	} else if o.Host != nil && o.Host.Scope != "process" {
-		o.warn("文件系统信息不可用")
+	if !listsOnly {
+		o.SectionTimes["metrics"] = now
+		host, filesystems, fsOK, hostErr := sampleHost(now, o.Host)
+		if hostErr == nil {
+			o.Host = host
+			o.SectionTimes["host"] = now
+		} else {
+			o.warn("主机信息读取失败：" + hostErr.Error())
+		}
+		if fsOK {
+			o.Filesystems = filesystems
+			o.SectionTimes["filesystems"] = now
+		} else if o.Host != nil && o.Host.Scope != "process" {
+			o.warn("文件系统信息不可用")
+		}
 	}
 	if d == nil {
 		o.Message = "Docker 未连接"
@@ -301,8 +313,8 @@ func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Ove
 		name string
 		load func() (func(), error)
 	}
-	var usage types.DiskUsage
 	var imageContainers map[string]int
+	var allContainers []container.Summary
 
 	sections := []section{
 		{"containers", func() (func(), error) {
@@ -310,8 +322,9 @@ func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Ove
 			if err != nil {
 				return nil, err
 			}
-			items, running, projects, missing := containerRows(ctx, d, rows, o.Containers)
+			items, running, projects, missing := containerRows(ctx, d, rows, o.Containers, listsOnly)
 			return func() {
+				allContainers = rows
 				imageContainers = make(map[string]int)
 				for _, row := range rows {
 					imageContainers[row.ImageID]++
@@ -349,18 +362,17 @@ func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Ove
 			}
 			return func() { o.Networks = networkRows(rows); o.NetworkCount = len(rows) }, nil
 		}},
-		{"disk_usage", func() (func(), error) {
-			rows, cached := disk.reuse(now)
-			if !cached {
-				fresh, err := d.DiskUsage(ctx, types.DiskUsageOptions{})
-				if err != nil {
-					return nil, err
-				}
-				rows = fresh
-				disk.keep(rows, now)
+	}
+	// Apply a real disk sample before deriving volume sizes from it. Between
+	// samples the list readers reuse the last known sizes and their timestamp.
+	if !listsOnly && (disk.at.IsZero() || now.Sub(disk.at) >= diskReuseWindow) {
+		sections = append(sections, section{"disk_usage", func() (func(), error) {
+			rows, err := d.DiskUsage(ctx, types.DiskUsageOptions{})
+			if err != nil {
+				return nil, err
 			}
 			return func() {
-				usage = rows
+				disk.usage, disk.at = rows, now
 				o.DiskUsage = diskTotals(rows)
 				if !o.SectionTimes["containers"].Equal(now) {
 					o.Containers = slices.Clone(o.Containers)
@@ -379,19 +391,22 @@ func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Ove
 					}
 				}
 			}, nil
-		}},
-		{"volumes", func() (func(), error) {
-			rows, err := d.VolumeList(ctx, volume.ListOptions{})
-			if err != nil {
-				return nil, err
-			}
-			return func() {
-				o.Volumes = volumeRows(rows, usage.Volumes)
-				o.VolumeCount = len(rows.Volumes)
-			}, nil
-		}},
+		}})
 	}
-	if api, ok := d.(engineAPI); ok {
+	sections = append(sections, section{"volumes", func() (func(), error) {
+		rows, err := d.VolumeList(ctx, volume.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		return func() {
+			o.Volumes = volumeRows(rows, disk.usage.Volumes)
+			if o.SectionTimes["containers"].Equal(now) {
+				setVolumeReferences(o.Volumes, allContainers)
+			}
+			o.VolumeCount = len(rows.Volumes)
+		}, nil
+	}})
+	if api, ok := d.(engineAPI); ok && !listsOnly {
 		sections = append(sections, section{"engine", func() (func(), error) {
 			engine, err := readEngine(ctx, api, now)
 			return func() { o.Engine = engine }, err
@@ -415,7 +430,10 @@ func refresh(ctx context.Context, d Docker, prev *Overview, disk *diskState) Ove
 		}
 		r.apply()
 		o.SectionTimes[name] = now
-		o.Available = true
+		switch name {
+		case "containers", "images", "networks", "volumes":
+			o.Available = true
+		}
 	}
 	if !o.Available {
 		o.Message = "无法读取本机 Docker 资源"

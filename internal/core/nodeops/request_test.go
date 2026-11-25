@@ -39,3 +39,37 @@ func TestRequestRequiresExactResourcesAndKnownAction(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeSourceCreateValidation(t *testing.T) {
+	const action Action = "compose.source-create"
+	edit := ComposeSourceEdit{Path: "compose.yaml", Content: "services: {}"}
+	req := Request{Action: action, Target: "my_project-2", ComposeSource: &edit}
+	if err := req.Validate(); err != nil {
+		t.Fatalf("valid create: %v", err)
+	}
+	if !action.Mutates() || !action.ComposeFileOperation() || action.LocalDirect() {
+		t.Fatal("invalid dispatch classification")
+	}
+	for _, target := range []string{"", "../escape", "Project", "-option", "moori-" + strings.Repeat("a", 32)} {
+		bad := req
+		bad.Target = target
+		if bad.Validate() == nil {
+			t.Errorf("accepted target %q", target)
+		}
+	}
+	for _, invalid := range []ComposeSourceEdit{
+		{Path: "compose.yaml"}, {Path: "other/compose.yaml", Content: edit.Content},
+		{Path: "compose.yaml", Revision: strings.Repeat("a", 64), Content: edit.Content},
+		{Path: "compose.yaml", Content: strings.Repeat("x", MaxComposeBytes/4+1)},
+	} {
+		bad := req
+		bad.ComposeSource = &invalid
+		if bad.Validate() == nil {
+			t.Fatal("accepted invalid create draft")
+		}
+	}
+	req.ForceRecreate = true
+	if req.Validate() == nil {
+		t.Fatal("accepted force recreate during creation")
+	}
+}

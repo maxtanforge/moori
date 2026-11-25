@@ -46,8 +46,11 @@ func TestAgentResourcesForAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := adminSession(t, server)
-	get := func(agent string, session *http.Cookie) *httptest.ResponseRecorder {
+	get := func(agent string, session *http.Cookie, validators ...string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", server.URL+"/api/v1/nodes/"+agent+"/resources", nil)
+		for _, tag := range validators {
+			r.Header.Add("If-None-Match", tag)
+		}
 		if session != nil {
 			r.AddCookie(session)
 		}
@@ -65,6 +68,46 @@ func TestAgentResourcesForAdmin(t *testing.T) {
 			t.Fatalf("missing %s in %s", want, body)
 		}
 	}
+	tag := w.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("resource view has no ETag")
+	}
+	if w := get("agent-9", cookie, tag); w.Code != 304 || w.Body.Len() != 0 || w.Header().Get("ETag") != tag {
+		t.Fatal("unchanged inventory", w.Code, w.Body.String())
+	}
+	if err := health.RecordContact(ctx, "agent-9", 2, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	w = get("agent-9", cookie, tag)
+	if w.Code != 200 || w.Header().Get("ETag") == tag || !strings.Contains(w.Body.String(), "online") {
+		t.Fatal("contact state changed", w.Code, w.Body.String())
+	}
+	tag = w.Header().Get("ETag")
+	contact := time.Now().Add(11 * time.Second).Truncate(time.Millisecond).UTC()
+	if err := health.RecordContact(ctx, "agent-9", 2, contact); err != nil {
+		t.Fatal(err)
+	}
+	if w := get("agent-9", cookie, tag); w.Code != 304 || w.Header().Get("X-Moori-Last-Contact") != contact.Format(time.RFC3339Nano) {
+		t.Fatal("heartbeat metadata", w.Code, w.Header())
+	}
+	// Two different inventories can be accepted within the same millisecond.
+	at := time.Now()
+	updated := localinv.Overview{Available: true, GeneratedAt: at, SectionTimes: map[string]time.Time{"containers": at.Add(-3 * time.Minute)}, ContainerCount: 4}
+	for _, count := range []int{4, 5} {
+		updated.ContainerCount = count
+		document, err := json.Marshal(updated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := health.RecordInventory(ctx, "agent-9", 2, document, at); err != nil {
+			t.Fatal(err)
+		}
+		w = get("agent-9", cookie, tag)
+		if w.Code != 200 || w.Header().Get("ETag") == tag || !strings.Contains(w.Body.String(), `"stale":true`) {
+			t.Fatal("changed inventory with old Docker sample", w.Code, w.Body.String())
+		}
+		tag = w.Header().Get("ETag")
+	}
 	if w := get(storage.LocalExecutorID, cookie); w.Code != 200 || !strings.Contains(w.Body.String(), `"contact":"online"`) ||
 		!strings.Contains(w.Body.String(), `"stale":true`) || !strings.Contains(w.Body.String(), `"container_count":4`) ||
 		!strings.Contains(w.Body.String(), `"management_available":false`) {
@@ -79,7 +122,7 @@ func TestAgentResourcesForAdmin(t *testing.T) {
 	if err := store.BindAgent(ctx, "agent-9", 3, [32]byte{3}); err != nil {
 		t.Fatal(err)
 	}
-	if w := get("agent-9", cookie); w.Code != 200 || strings.Contains(w.Body.String(), `"overview"`) || !strings.Contains(w.Body.String(), `"contact":"never_seen"`) {
+	if w := get("agent-9", cookie, tag); w.Code != 200 || strings.Contains(w.Body.String(), `"overview"`) || !strings.Contains(w.Body.String(), `"contact":"never_seen"`) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if err := health.RecordContact(ctx, "agent-9", 3, time.Now()); err != nil {
@@ -122,6 +165,7 @@ func TestAgentResourcesForAdmin(t *testing.T) {
 		t.Fatal(lw.Code, lw.Body.String())
 	}
 	member := httptest.NewRequest("GET", memberServer.URL+"/api/v1/nodes/agent-9/resources", nil)
+	member.Header.Set("If-None-Match", tag)
 	member.AddCookie(lw.Result().Cookies()[0])
 	mw := httptest.NewRecorder()
 	memberServer.Config.Handler.ServeHTTP(mw, member)
@@ -129,6 +173,7 @@ func TestAgentResourcesForAdmin(t *testing.T) {
 		t.Fatal("member access must be forbidden:", mw.Code)
 	}
 	anonymous := httptest.NewRequest("GET", memberServer.URL+"/api/v1/nodes/agent-9/resources", nil)
+	anonymous.Header.Set("If-None-Match", tag)
 	aw := httptest.NewRecorder()
 	memberServer.Config.Handler.ServeHTTP(aw, anonymous)
 	if aw.Code != http.StatusUnauthorized {

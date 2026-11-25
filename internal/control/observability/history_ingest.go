@@ -49,8 +49,15 @@ func prepareMetricHistory(raw json.RawMessage, received time.Time) []historySamp
 		// RecordInventory has historically accepted arbitrary JSON snapshots.
 		return nil
 	}
+	// A later list refresh can carry the latest full sample across a busy or
+	// disconnected channel. Use its collection cycle and deduplicate by the
+	// measurement timestamp when recording each series.
+	cycle := overview.SectionTimes["metrics"]
+	if cycle.IsZero() {
+		cycle = overview.GeneratedAt
+	}
 	var samples []historySample
-	if host := overview.Host; host != nil && freshHistorySample(host.SampledAt, overview.GeneratedAt, received) {
+	if host := overview.Host; host != nil && freshHistorySample(host.SampledAt, cycle, received) {
 		sample := historySample{
 			point: HistoryPoint{
 				At:         host.SampledAt,
@@ -92,7 +99,7 @@ func prepareMetricHistory(raw json.RawMessage, received time.Time) []historySamp
 	for _, container := range overview.Containers {
 		stats := container.Stats
 		if stats == nil || !historyContainerID.MatchString(container.FullID) ||
-			!freshHistorySample(stats.SampledAt, overview.GeneratedAt, received) {
+			!freshHistorySample(stats.SampledAt, cycle, received) {
 			continue
 		}
 		name := container.Name

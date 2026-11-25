@@ -50,7 +50,7 @@ func (r Runner) volume(ctx context.Context, req nodeops.Request) (nodeops.Result
 	var refs []nodeops.Reference
 	for _, c := range rows {
 		for _, m := range c.Mounts {
-			if m.Name == v.Name {
+			if m.Type == "volume" && (m.Name == v.Name || m.Name == "" && v.Mountpoint != "" && m.Source == v.Mountpoint) {
 				refs = append(refs, referenceFrom(c))
 				break
 			}

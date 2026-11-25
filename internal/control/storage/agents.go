@@ -11,12 +11,18 @@ func (s *Store) BindAgent(ctx context.Context, id string, generation int64, fing
 	if id == "" || generation <= 0 || fingerprint == [32]byte{} {
 		return ErrInvalid
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO agent_certificates(agent,generation,fingerprint) VALUES (?,?,?)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO agent_certificates(agent,generation,fingerprint)
+ SELECT ?,?,? WHERE ?>=`+nextAgentGeneration+`
+ AND NOT EXISTS(SELECT 1 FROM agent_identity_history WHERE retired_fingerprint=?)
  ON CONFLICT(agent) DO UPDATE SET generation=excluded.generation,fingerprint=excluded.fingerprint
  WHERE (excluded.generation>agent_certificates.generation AND excluded.fingerprint<>agent_certificates.fingerprint)
     OR (excluded.generation=agent_certificates.generation AND excluded.fingerprint=agent_certificates.fingerprint)`,
-		id, generation, fingerprint[:])
-	return expectOne(res, err, ErrConflict)
+		id, generation, fingerprint[:], generation, id, fingerprint[:])
+	if err := expectOne(res, err, ErrConflict); err != nil {
+		return err
+	}
+	s.cancelAgentSessions(id, generation-1)
+	return nil
 }
 
 func (s *Store) ResolveAgent(ctx context.Context, fingerprint [32]byte) (string, int64, error) {

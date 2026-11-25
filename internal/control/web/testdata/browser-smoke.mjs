@@ -171,6 +171,21 @@ try {
     await evaluate("document.getElementById('monitor-back').click()");
     await until("location.pathname === '/node/%40local/overview' && document.getElementById('monitoring').hidden");
     await until("document.querySelector('.node-snapshot-summary progress')");
+    await until('!pendingNodeRead');
+    assert.deepEqual(await evaluate(`(async () => {
+      const original = window.fetch;
+      const statuses = [];
+      window.fetch = async (path,options) => {
+        const response = await original(path,options);
+        if (path.endsWith('/resources')) statuses.push(response.status);
+        return response;
+      };
+      try {
+        await loadNodeResources();
+        await loadNodeResources();
+        return [statuses.at(-1),nodeSnapshot.read_failed === true];
+      } finally { window.fetch = original; }
+    })()`), [304,false], 'resource polling revalidates the current authorized inventory');
     await screenshot('node-overview');
     assert.equal(await evaluate("document.getElementById('node-heading').textContent"), '本机 Docker');
     assert.ok(await evaluate("document.getElementById('console-sidebar').contains(document.getElementById('resource-node'))"));
@@ -363,6 +378,23 @@ try {
     assert.deepEqual(await evaluate('removalCalls[1]'),{action:'compose.remove',target:'cleanup-stack',remove_volumes:true,generation:1});
     assert.equal(await evaluate("document.querySelector('#management-content a[href=\"/node/%40local/networks\"]')?.textContent"), '前往网络列表');
     await evaluate("document.getElementById('management-dialog').close();window.fetch=removalFetch");
+    await evaluate(`
+      window.beforePortMappings = nodeSnapshot;
+      nodeSnapshot = structuredClone(nodeSnapshot);
+      nodeSnapshot.overview.containers.find(item=>item.name==='test-web').ports = [{private:9000,protocol:'tcp'}];
+      nodeSnapshot.overview.containers.find(item=>item.name==='edge-proxy').ports = [
+        {ip:'127.0.0.1',public:8080,private:80,protocol:'tcp'},
+        {ip:'2001:db8::1',public:5353,private:53,protocol:'udp'},
+        {private:9999,protocol:'tcp'}
+      ];
+      renderWorkspaceBody();
+    `);
+    const expectedPortMappings = ['127.0.0.1:8080 → 80/tcp','[2001:db8::1]:5353 → 53/udp'];
+    const visiblePorts = selector => evaluate(`[...document.querySelectorAll('${selector}')].filter(el=>el.getClientRects().length).map(el=>el.textContent)`);
+    assert.ok(await evaluate("[...document.querySelectorAll('.container-list th')].some(th=>th.innerText==='端口映射')"), 'desktop lists published ports in their own column');
+    assert.deepEqual(await visiblePorts('.container-list .container-ports span'),expectedPortMappings);
+    assert.deepEqual(await visiblePorts('.container-list .container-ports-mobile span'),[]);
+    assert.equal(await evaluate("document.querySelector('.container-list tbody tr:first-child .container-ports').textContent"),'—');
     await screenshot('containers');
     assert.equal(await evaluate("Array.from(document.querySelectorAll('.workspace-location, #environment-path')).filter(path => path.getClientRects().length).length"), 1, 'one visible resource breadcrumb');
     assert.equal(await evaluate("document.getElementById('workspace-section').pathname"), '/environments');
@@ -373,7 +405,10 @@ try {
     assert.equal(await evaluate("getComputedStyle(document.querySelector('.container-list th:nth-child(4)')).display"),'none');
     assert.ok(await evaluate("document.querySelector('.container-list a[aria-label=\"查看日志\"]').getBoundingClientRect().width >= 44"), 'mobile log shortcut stays visible and tappable');
     assert.ok(await evaluate("document.querySelector('.container-list a[aria-label=\"进入终端\"]').getBoundingClientRect().width >= 44"), 'mobile terminal shortcut stays visible and tappable');
+    assert.deepEqual(await visiblePorts('.container-list .container-ports span'),[]);
+    assert.deepEqual(await visiblePorts('.container-list td:nth-child(2) .container-ports-mobile span'),expectedPortMappings);
     await screenshot('containers-mobile');
+    await evaluate('nodeSnapshot = beforePortMappings; renderWorkspaceBody()');
     await evaluate("document.getElementById('sidebar-toggle').click()");
     assert.ok(await evaluate("document.getElementById('resource-node').getBoundingClientRect().height >= 44"), 'mobile node selector touch target');
     assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
@@ -646,7 +681,7 @@ try {
       let pullPolls = 0, postPullReads = 0;
       const operations = '/api/v1/nodes/%40local/operations';
       window.fetch = (path,options) => {
-        if (path === '/api/v1/nodes/%40local/resources') return imageFetch(path,options).then(async response => {
+        if (path === '/api/v1/nodes/%40local/resources') return imageFetch(path,{...options,headers:{}}).then(async response => {
           const snapshot = await response.json();
           const before = !imageCalls.some(item=>item.action==='image.delete') || ++imageRefreshReads === 1;
           if (before) {
@@ -868,7 +903,7 @@ try {
     await evaluate("document.getElementById('maintenance-back').click()");
     await until("document.querySelector('.maintenance-heading h2')?.textContent === 'test-stack'");
     assert.match(await evaluate("document.querySelector('.maintenance-related').textContent"),/test-web/);
-    assert.match(await evaluate("document.querySelector('.maintenance-heading').textContent"),/受限管理/);
+    assert.match(await evaluate("document.querySelector('.maintenance-heading').textContent"),/源文件项目/);
     await evaluate("[...document.querySelectorAll('.maintenance-actions button')].find(b=>b.textContent==='删除项目').click()");
     assert.match(await evaluate("document.getElementById('management-content').textContent"),/test-web/);
     assert.equal(await evaluate("document.querySelector('#management-content [name=remove_volumes]')"),null);
@@ -887,18 +922,59 @@ try {
     assert.deepEqual(await evaluate('projectRemoval'),{action:'compose.remove',target:'test-stack',remove_volumes:false,generation:1});
     const projectRow = "document.querySelector('#resource-view a[href$=test-stack]')";
     assert.equal(await evaluate(projectRow),null,'confirmed removal immediately hides the project');
+    assert.equal(await evaluate("document.getElementById('create-compose').hidden"),false);
+    await evaluate("document.getElementById('create-compose').click()");
+    await until("document.querySelector('#maintenance-page form textarea[name=compose]')");
+    assert.equal(await evaluate("document.getElementById('maintenance-back').pathname"),'/node/%40local/compose');
+    const yamlDraft = '# keep comment\nservices:\n  web:\n    image: nginx:alpine\n';
+    await evaluate(`
+      window.createCalls = [];
+      window.fetch = (path, options) => {
+        if (path.endsWith('/operations') && options?.method === 'POST') {
+          createCalls.push(JSON.parse(options.body));
+          return Promise.resolve(Response.json({id:'e'.repeat(32),action:'compose.source-create',
+            state:createCalls.length === 1 ? 'failed' : 'queued',error:'校验失败'}));
+        }
+        if (path.endsWith('/operations/' + 'e'.repeat(32))) return Promise.resolve(Response.json({
+          id:'e'.repeat(32),action:'compose.source-create',state:'succeeded',
+          result:{resource_observed_at:new Date().toISOString(),compose_source:{after:['web']}}
+        }));
+        return beforeProjectRemove(path,options);
+      };
+      window.createComposeForm = document.querySelector('#maintenance-page form');
+      createComposeForm.elements.name.value = 'new';
+      createComposeForm.elements.compose.value = ${JSON.stringify(yamlDraft)};
+      createComposeForm.requestSubmit();
+    `);
+    await until("document.getElementById('maintenance-status').textContent.includes('校验失败')");
+    assert.equal(await evaluate("createComposeForm.elements.compose.value"),yamlDraft);
+    await evaluate("createComposeForm.requestSubmit()");
+    await until("document.getElementById('maintenance-status').textContent.includes('等待节点')");
+    assert.equal(await evaluate("createComposeForm.elements.name.disabled"),true);
+    await until("document.querySelector('#maintenance-results a[href$=\"/compose/new/edit\"]')");
+    assert.deepEqual(await evaluate('createCalls[1]'),{action:'compose.source-create',target:'new',
+      compose_source:{path:'compose.yaml',revision:'',content:yamlDraft},generation:1});
+    await evaluate("window.fetch = beforeProjectRemove; document.getElementById('maintenance-back').click()");
+    await until("location.pathname === '/node/%40local/compose'");
     await evaluate("loadNodeResources(true)");
     assert.equal(await evaluate(projectRow),null,'an older container inventory must not restore the project');
+    assert.match(await evaluate("document.querySelector('#resource-view a[href$=\"/compose/new\"]')?.closest('tr').textContent"),/new.*web/);
     await evaluate(`
       window.fetch = async (path, options) => {
-        const response = await beforeProjectRemove(path, options);
+        const response = await beforeProjectRemove(path,path.endsWith('/resources') ? {...options,headers:{}} : options);
         if (!path.endsWith('/resources')) return response;
         const data = await response.json();
+        data.overview.generated_at = new Date().toISOString();
         data.overview.section_times = {containers:new Date(Date.now() + 60000).toISOString()};
+        if (!window.hostStackRemoved) data.overview.compose_projects.push({name:'host-stack',services:['web']});
         return Response.json(data);
       };
-      loadNodeResources(true).finally(() => { window.fetch = beforeProjectRemove; });
     `);
+    const hostProjectRow = "document.querySelector('#resource-view a[href$=host-stack]')";
+    await until(hostProjectRow,160);
+    await evaluate("window.hostStackRemoved = true");
+    await until('!' + hostProjectRow,160);
+    await evaluate("window.fetch = beforeProjectRemove");
     await until(projectRow);
     await evaluate(projectRow + ".click()");
     await until("document.querySelector('.maintenance-heading h2')?.textContent === 'test-stack'");
@@ -1253,7 +1329,7 @@ try {
     await evaluate(`
       var managedFetch = window.fetch;
       window.fetch = async (path, options) => {
-        const response = await managedFetch(path, options);
+        const response = await managedFetch(path,path.endsWith('/resources') ? {...options,headers:{}} : options);
         if (path !== '/api/v1/nodes/%40local/resources') return response;
         const result = await response.json();
         result.updated_at = new Date(Date.now()+1000).toISOString();
@@ -1282,7 +1358,7 @@ try {
         const read = ++resourceReads;
         if (read === 1) await new Promise(resolve => { window.releaseResourceRead = resolve; });
         if (read >= 4) return new Response('node unavailable', {status:503});
-        const response = await snapshotFetch(path, options);
+        const response = await snapshotFetch(path,path.endsWith('/resources') ? {...options,headers:{}} : options);
         const result = await response.json();
         if (read <= 2) window.fixedSnapshotTimestamp = new Date(Date.now()+1000+read).toISOString();
         result.updated_at = fixedSnapshotTimestamp;
@@ -1311,7 +1387,7 @@ try {
     assert.match(await evaluate("document.getElementById('resource-view').textContent"), /24.5%/);
     await evaluate(`
       window.fetch = async (path,options) => {
-        const response = await snapshotFetch(path,options);
+        const response = await snapshotFetch(path,path.endsWith('/resources') ? {...options,headers:{}} : options);
         if (path !== '/api/v1/nodes/%40local/resources') return response;
         return Response.json({...await response.json(),updated_at:fixedSnapshotTimestamp,contact:'online',management_available:false});
       };
@@ -1847,6 +1923,28 @@ try {
     await until(`!document.getElementById('agent-token-result').hidden`);
     await evaluate(`window.fetch = agentTokenFetch`);
     assert.equal(await evaluate(`document.getElementById('onboarding').hidden`), true);
+    // Exercise removal on a separate registration so server-2 remains available for the target tests.
+    await evaluate(`fetch('/api/v1/agents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'retired-node'})}).then(async response=>{
+      if (!response.ok) throw new Error(await response.text());
+      await fetch('/api/v1/nodes/retired-node/display-name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:'旧主机'})});
+      document.getElementById('reload-node-directory').click();
+    })`);
+    await until("document.querySelector('[data-delete-node=retired-node]')");
+    assert.equal(await evaluate("document.querySelector('[data-delete-node=\"@local\"]') === null"),true);
+    await evaluate("document.querySelector('[data-delete-node=retired-node]').click()");
+    assert.match(await evaluate("document.getElementById('management-content').textContent"),/旧主机.*retired-node.*Token/);
+    await evaluate("document.querySelector('#management-content button').click()");
+    assert.equal(await evaluate("document.getElementById('management-dialog').open"),false);
+    await evaluate(`var beforeDeleteFetch = window.fetch, finishDelete;
+      window.fetch = (path,options) => path === '/api/v1/agents/retired-node' && options?.method === 'DELETE'
+        ? new Promise(resolve=>{finishDelete=()=>resolve(new Response('generation conflict',{status:409}))}) : beforeDeleteFetch(path,options);
+      document.querySelector('[data-delete-node=retired-node]').click(); document.querySelector('#management-content .danger').click()`);
+    await until("typeof finishDelete === 'function' && document.querySelector('#management-content .danger').disabled");
+    await evaluate("finishDelete()");
+    await until("document.getElementById('management-status').textContent.includes('generation conflict') && !document.querySelector('#management-content .danger').disabled");
+    assert.equal(await evaluate("!!document.querySelector('[data-delete-node=retired-node]')"),true);
+    await evaluate("window.fetch=beforeDeleteFetch; document.querySelector('#management-content .danger').click()");
+    await until("!document.getElementById('management-dialog').open && !document.querySelector('[data-delete-node=retired-node]') && !document.querySelector('#resource-node option[value=retired-node]')");
     const issuedToken = await evaluate(`document.getElementById('agent-token-value').value`);
     assert.match(issuedToken, /^[A-Za-z0-9_-]{43}$/);
     assert.deepEqual(await evaluate(`fetch('/api/v1/projects/my-app/targets').then(r=>r.json()).then(page=>page.items.map(item=>[item.id,item.state || 'compose']))`),[['compose-ci','compose'],['edge-ci','container'],['my-production','compose']]);
@@ -1934,6 +2032,15 @@ try {
         await screenshot(label);
       }
     }
+    await evaluate("history.pushState(null,'','/node/%40local/containers'); dispatchEvent(new PopStateEvent('popstate'))");
+    await until("!pendingNodeRead && nodeSnapshot?.overview?.available");
+    await evaluate(`
+      const authorizedFetch = window.fetch;
+      window.fetch = (path,options) => path.endsWith('/resources')
+        ? Promise.resolve(new Response('forbidden',{status:403})) : authorizedFetch(path,options);
+      void loadNodeResources();
+    `);
+    await until("location.pathname === '/console' && !document.getElementById('console').hidden && !nodeSnapshot");
     await evaluate(`document.getElementById('logout').click()`);
     await until(`!document.getElementById('login-panel').hidden`);
     assert.equal(await evaluate(`document.getElementById('onboarding').hidden && document.getElementById('agent-token-panel').hidden && !document.getElementById('agent-token-value').value`), true);

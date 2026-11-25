@@ -12,23 +12,12 @@ import (
 	"time"
 
 	"github.com/maxtanforge/moori/internal/control/storage"
-	"github.com/maxtanforge/moori/internal/transport/httpproxy"
+	"github.com/maxtanforge/moori/internal/transport/agentwire"
 	"github.com/maxtanforge/moori/internal/transport/logstream"
 )
 
 func LiveLogEndpoint(store *storage.Store, broker *logstream.Broker, proxies ...netip.Prefix) http.Handler {
-	authenticate := AuthenticateCredential(store)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		if !httpproxy.HTTPS(r, proxies) {
-			http.Error(w, "remote log streams require verified HTTPS", http.StatusUpgradeRequired)
-			return
-		}
-		peer, err := authenticate(r)
-		if err != nil {
-			http.Error(w, "Agent identity rejected", http.StatusUnauthorized)
-			return
-		}
+	return relayEndpoint(store, proxies, "remote log streams require verified HTTPS", func(w http.ResponseWriter, r *http.Request, peer agentwire.Peer) {
 		if r.Method == http.MethodGet {
 			ticket, err := broker.Next(r.Context(), peer.ID, peer.Generation)
 			if err == nil {

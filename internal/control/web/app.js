@@ -1,5 +1,5 @@
-import {routeHref,option,field,row,joined,dateTime,percent,bytePair,formatBytes,download,deploymentState} from './ui-components.js';
-import {element,enc,show,notice,request,trackPageRead,resetPageProgress,setUnauthorizedHandler} from './api.js';
+import {routeHref,option,field,row,joined,formatContainerPort,dateTime,percent,bytePair,formatBytes,download,deploymentState} from './ui-components.js';
+import {element,enc,show,notice,request,requestNodeResources,trackPageRead,resetPageProgress,setUnauthorizedHandler} from './api.js';
 import {resolveSystemSettingsPath,renderSystemSettings,currentSettingsPath,registrySettingsPath,refreshRegistryDiscovery,templateEditor,createNodeResource,pullNodeImage,nodeById,activeNode} from './management.js';
 import './terminal.js';
 import './user-management.js';
@@ -9,7 +9,7 @@ import './ci-management.js';
 import './platform-audit.js';
 import './image-management.js';
 import './monitoring.js';
-import {parseNodeRoute,nodeRoute,workspaceNodeName,nodePath,renderNodeNavigation,snapshotNode,nodeSnapshot,resetNodeWorkspace,loadDirectoryHealth,loadOverviewTotals,nodeNameRevision,rememberNodeDisplayName,setNodeSnapshot,selectWorkspaceNode,renderNodeHeading,directoryHealth,renderNodeDirectory,nodeDisplayNames,renderSidebarNode,applyNodeResourceChanges,renderWorkspaceBody,renderNodeRecovery,showNodeDisplayNameEditor,saveNodeDisplayName} from './node-workspace.js';
+import {parseNodeRoute,nodeRoute,workspaceNodeName,nodePath,renderNodeNavigation,snapshotNode,nodeSnapshot,nodeSnapshotETag,resetNodeWorkspace,loadDirectoryHealth,loadOverviewTotals,nodeDirectoryRevision,nodeNameRevision,rememberNodeDisplayName,setNodeSnapshot,selectWorkspaceNode,renderNodeHeading,directoryHealth,renderNodeDirectory,nodeDisplayNames,renderSidebarNode,applyNodeResourceChanges,renderWorkspaceBody,renderNodeRecovery,showNodeDisplayNameEditor,saveNodeDisplayName} from './node-workspace.js';
 import {parseDeploymentEditor,renderMaintenancePage,deploymentEditorPath} from './maintenance-page.js';
 import './compose-maintenance.js';
 import './container-maintenance.js';
@@ -462,10 +462,21 @@ async function boot() {
   if (platformAdmin) {
     loadNodeList();
     clearInterval(nodeTimer);
-    nodeTimer = setInterval(refreshVisibleNodeViews,15000);
+    let tick = 0;
+    nodeTimer = setInterval(() => {
+      tick = (tick + 1) % 3;
+      if (tick === 0 || (nodeRoute && !nodeRoute.mode && liveResourceViews.has(nodeRoute.category) &&
+          !nodeRoute.monitor && !nodeRoute.logs && !nodeRoute.term)) refreshVisibleNodeViews();
+    },5000);
   }
   await loadProjects();
 }
+
+const liveResourceViews = new Set(['overview','compose','containers','images','networks','volumes']);
+
+document.addEventListener('visibilitychange',() => {
+  if (platformAdmin && !document.hidden) refreshVisibleNodeViews();
+});
 
 function refreshVisibleNodeViews() {
   if (document.hidden) return;
@@ -483,16 +494,28 @@ let nodeRequest = 0;
 let pendingNodeRead;
 let nodeTimer;
 
+export function refreshAfterNodeDeletion(id) {
+  agents = agents.filter(agent => agent.id !== id);
+  for (const select of [element('existing-agent'),element('resource-node')]) {
+    for (const item of [...select.options]) if (item.value === id) item.remove();
+  }
+  if (issuedAgentID === id || agentIssueAttempt?.id === id) resetAgentTokenPanel();
+  renderNodeDirectory();
+  renderSidebarNode();
+  void loadNodeList();
+}
+
 async function loadNodeList(more = false) {
   if (!platformAdmin) return;
   const version = accountEpoch;
   const select = element('resource-node');
   const previous = select.value;
   const nameRevision = nodeNameRevision;
+  const revision = nodeDirectoryRevision;
   try {
     const after = more ? nodePage : '';
     const page = await request('/api/v1/agents?after=' + enc(after));
-    if (version !== accountEpoch) return;
+    if (version !== accountEpoch || revision !== nodeDirectoryRevision) return;
     if (nameRevision === nodeNameRevision) {
       rememberNodeDisplayName('@local',page.local_display_name);
       for (const agent of page.items || []) rememberNodeDisplayName(agent.id,agent.display_name);
@@ -524,7 +547,7 @@ async function loadNodeList(more = false) {
     if (!more) void loadOverviewTotals();
     if (nodeRoute && !nodeSnapshot) await loadNodeResources();
   } catch (error) {
-    if (version === accountEpoch) element('node-directory-status').textContent = '读取节点列表失败：' + error.message;
+    if (version === accountEpoch && revision === nodeDirectoryRevision) element('node-directory-status').textContent = '读取节点列表失败：' + error.message;
   }
 }
 
@@ -594,8 +617,12 @@ export async function loadNodeResources(refreshAfterPending = false) {
   const status = element('resource-status');
   if (!nodeSnapshot) status.textContent = '正在读取节点资源…';
   try {
-    const data = await request('/api/v1/nodes/' + enc(id) + '/resources',undefined,undefined,AbortSignal.timeout(12000));
+    const result = await requestNodeResources('/api/v1/nodes/' + enc(id) + '/resources',nodeSnapshotETag(),
+      AbortSignal.timeout(12000),() => version === accountEpoch);
     if (version !== accountEpoch || requestId !== nodeRequest || nodeRoute?.id !== id) return;
+    const data = result.unchanged ? nodeSnapshot : result.data;
+    if (result.unchanged) data.last_contact = result.lastContact;
+    else data.etag = result.etag;
     const view = data.overview;
     if (nameRevision === nodeNameRevision && (nodeDisplayNames.get(id) || '') !== (data.display_name || '')) {
       rememberNodeDisplayName(id,data.display_name);
@@ -605,15 +632,31 @@ export async function loadNodeResources(refreshAfterPending = false) {
     }
     const node = element('resource-node').selectedOptions[0];
     if (node && data.generation) node.dataset.generation = data.generation;
+    const section = nodeRoute.category === 'compose' ? 'containers' : nodeRoute.category;
+    const sectionTimes = view?.section_times;
+    const sampled = sectionTimes?.[section];
+    const sectionMissing = sectionTimes && ['containers','images','networks','volumes'].includes(section) && !sampled;
+    const stale = data.stale || sectionMissing || Date.now() - Date.parse(sampled) > 120000;
+    const staleSections = Object.entries(sectionTimes || {}).filter(([,time]) => Date.now() - Date.parse(time) > 120000)
+      .map(([key]) => key).sort().join(',');
+    const sectionsAged = staleSections !== (nodeSnapshot?.staleSections || '');
+    data.staleSections = staleSections;
     status.textContent = view ? [
-      data.stale && '上次快照已过期', data.updated_at && '采集于 ' + dateTime(data.updated_at),
+      (data.stale || (stale && !sectionMissing)) && '上次快照已过期',
+      sectionMissing ? '此项尚无采集记录' : sampled ? '采集于 ' + dateTime(sampled) : data.updated_at && '上报于 ' + dateTime(data.updated_at),
       view.truncated && '清单已截断', view.warning, view.message, view.host?.warning
     ].filter(Boolean).join(' · ') : (data.message || '等待节点上报资源。');
-    element('node-workspace').classList.toggle('node-stale', !!data.stale);
+    element('node-workspace').classList.toggle('node-stale', !!stale);
+    if (result.unchanged) {
+      if (sectionsAged) renderWorkspaceBody();
+      else renderNodeRecovery(id,data);
+      return;
+    }
     const contactChanged = nodeSnapshot?.contact !== data.contact;
     const recoveryChanged = contactChanged || nodeSnapshot?.read_failed ||
       nodeSnapshot?.management_available !== data.management_available || nodeSnapshot?.message !== data.message;
-    const snapshotChanged = !nodeSnapshot || recoveryChanged || !data.updated_at ||
+    const snapshotChanged = !nodeSnapshot || recoveryChanged || sectionsAged || nodeSnapshot.stale !== data.stale ||
+      !data.updated_at || nodeSnapshot.etag !== data.etag ||
       nodeSnapshot.updated_at !== data.updated_at || nodeSnapshot.generation !== data.generation ||
       nodeSnapshot.overview?.generated_at !== view?.generated_at;
     const overrideDropped = applyNodeResourceChanges(data,id);
@@ -623,6 +666,12 @@ export async function loadNodeResources(refreshAfterPending = false) {
     else renderNodeRecovery(id,data);
   } catch (error) {
     if (version === accountEpoch && requestId === nodeRequest && nodeRoute?.id === id) {
+      if (error.status === 403) {
+        signedOut();
+        history.replaceState(null,'',routeHref('console'));
+        try { await boot(); } catch (accountError) { notice(accountError.message,'error'); }
+        return;
+      }
       status.textContent = (nodeSnapshot?.overview ? '读取失败，保留上次快照：' : '读取节点资源失败：') + error.message;
       element('node-workspace').classList.add('node-stale');
       if (!nodeSnapshot?.read_failed) {
@@ -672,7 +721,7 @@ export function resourceGroups(view) {
 
 export function containerRow(item) {
   const stats = item.stats || {};
-  const ports = (item.ports || []).map(port => port.public ? `${port.ip ? port.ip + ' · ' : ''}${port.public} → ${port.private}/${port.protocol}` : `${port.private}/${port.protocol}`);
+  const ports = (item.ports || []).map(formatContainerPort);
   const mounts = (item.mounts || []).map(mount => `${mount.source || mount.type} → ${mount.destination}${mount.read_only ? '（只读）' : ''}`);
   const state = {running:'运行中', exited:'已停止', created:'已创建', restarting:'重启中', paused:'已暂停'}[item.state] || item.state;
   return [
@@ -695,9 +744,10 @@ function updateExecutionMode() {
 }
 
 async function loadAgents(more = false) {
+  const revision = nodeDirectoryRevision;
   const version = accountEpoch;
   const page = await request('/api/v1/agents?after=' + enc(more ? cursors.agents || '' : ''));
-  if (version !== accountEpoch) return;
+  if (version !== accountEpoch || revision !== nodeDirectoryRevision) return;
   if (!more) { agents = []; element('existing-agent').replaceChildren(); }
   for (const agent of page.items) {
     agents.push(agent);
@@ -817,7 +867,7 @@ action('download-credential', () => {
 });
 action('download-compose', () => {
   if (!issuedAgentID) return;
-  const compose = `services:\n  moori-agent:\n    image: \${MOORI_AGENT_IMAGE:-ghcr.io/maxtanforge/moori-agent:0.1.0}\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - moori-agent-data:/data\n      - /proc:/host/proc:ro\n      - /sys:/host/sys:ro\n      - /etc/os-release:/host/etc/os-release:ro\n      - /etc/hostname:/host/etc/hostname:ro\n    environment:\n      MOORI_ENDPOINT: "\${MOORI_ENDPOINT:?set Agent WebSocket endpoint}"\n      MOORI_AGENT_TOKEN: "\${MOORI_AGENT_TOKEN:?set Agent token}"\n      MOORI_HOST_ROOT: /host\n    restart: unless-stopped\nvolumes:\n  moori-agent-data:\n`;
+  const compose = `services:\n  moori-agent:\n    image: \${MOORI_AGENT_IMAGE:-ghcr.io/maxtanforge/moori-agent:0.2.0}\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - moori-agent-data:/data\n      - /proc:/host/proc:ro\n      - /sys:/host/sys:ro\n      - /etc/os-release:/host/etc/os-release:ro\n      - /etc/hostname:/host/etc/hostname:ro\n    environment:\n      MOORI_ENDPOINT: "\${MOORI_ENDPOINT:?set Agent WebSocket endpoint}"\n      MOORI_AGENT_TOKEN: "\${MOORI_AGENT_TOKEN:?set Agent token}"\n      MOORI_HOST_ROOT: /host\n    restart: unless-stopped\nvolumes:\n  moori-agent-data:\n`;
   download('compose.' + issuedAgentID + '.yml', compose);
 });
 window.addEventListener('beforeunload', event => {

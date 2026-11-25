@@ -96,6 +96,13 @@ type NodeInventory struct {
 	Overview json.RawMessage `json:"overview"`
 }
 
+// An empty ack is the original successful response. Retry requests the latest
+// snapshot again, while Rejected permanently discards an invalid snapshot.
+type NodeInventoryAck struct {
+	Retry    bool `json:"retry,omitempty"`
+	Rejected bool `json:"rejected,omitempty"`
+}
+
 type NodeOperation struct {
 	ID        string          `json:"id"`
 	ExpiresMS int64           `json:"expires_ms"`

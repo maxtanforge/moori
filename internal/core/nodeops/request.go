@@ -205,7 +205,7 @@ func (a Action) Timeout() time.Duration {
 	if a == RegistryPull {
 		return 6 * time.Hour
 	}
-	if a == ContainerCreate || a == ContainerRelease || a == ImagePush || a.Archive() {
+	if a == ContainerCreate || a == ContainerRelease || a == ComposeSourceCreate || a == ImagePush || a.Archive() {
 		return 15 * time.Minute
 	}
 	if a == ComposeRemove || a == ContainerReplace || a == ComposeSourceDeploy {

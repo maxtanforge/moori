@@ -7,7 +7,7 @@ const expectedTimestamp = time => new Intl.DateTimeFormat(undefined,{
 const points = [
   {at: '2026-01-01T00:15:00Z', cpu_percent: 12, memory_bytes: 512, rx_bytes_sec: 0.0085},
   {at: '2026-01-01T00:16:00Z', cpu_percent: 13, memory_bytes: 768},
-  {at: '2026-01-01T00:45:00Z', cpu_percent: 61, memory_bytes: 1024, rx_bytes_sec: 0.125, tx_bytes_sec: 0}
+  {at: '2026-01-01T00:45:00Z', cpu_percent: 61, memory_bytes: 1024, disk_used_bytes: 900 * 2**30, read_bytes_sec: 982 * 2**20, rx_bytes_sec: 0.125, tx_bytes_sec: 0}
 ];
 const range = {from: '2026-01-01T00:00:00Z', until: '2026-01-01T01:00:00Z', step_seconds: 60};
 const containerID = 'a'.repeat(64);
@@ -79,11 +79,14 @@ async function run() {
   element('monitoring').parentElement.hidden = false;
   check(requestPaths.length === 0 && !refreshTick, 'Inactive monitoring issued a request');
   let timeAxisLabels;
+  const charts = [];
   const Chart = window.uPlot;
   window.uPlot = new Proxy(Chart, {
     construct(target, args) {
       timeAxisLabels = args[0].axes[0].values;
-      return Reflect.construct(target, args);
+      const plot = Reflect.construct(target, args);
+      charts.push(plot);
+      return plot;
     }
   });
   renderMonitorRoute({id:'healthy',category:'overview'});
@@ -91,6 +94,34 @@ async function run() {
     .catch(error => { throw new Error(error.message + ': ' + (browserError || element('monitor-history-status').textContent)); });
   check(requestPaths.some(path => path.endsWith('/healthy/history?range=1h')), 'Node monitoring did not directly query its history');
   window.uPlot = Chart;
+  for (const metric of ['网络速率','磁盘','磁盘 I/O']) {
+    const plot = charts.find(item => item.root.parentElement.dataset.metric === metric);
+    const {width,height} = plot;
+    const ctx = plot.ctx;
+    const drawText = ctx.fillText;
+    let ticks;
+    ctx.fillText = function(label,x,...rest) {
+      if (this.textAlign === 'right') {
+        ticks.push({label, left:x - this.measureText(label).actualBoundingBoxLeft});
+      }
+      drawText.call(this,label,x,...rest);
+    };
+    try {
+      for (const chartWidth of [640,280]) {
+        ticks = [];
+        plot.setSize({width:chartWidth,height});
+        plot.redraw();
+        await new Promise(requestAnimationFrame);
+        check(ticks.length > 0, metric + ' did not draw Y-axis ticks');
+        for (const {label,left} of ticks) {
+          check(left >= 0, metric + ' clipped "' + label + '" at x=' + left + ' on a ' + chartWidth + 'px chart');
+        }
+      }
+    } finally {
+      ctx.fillText = drawText;
+      plot.setSize({width,height});
+    }
+  }
   const midnight = new Date(2026, 0, 2).getTime() / 1000;
   for (const step of [60, 1]) {
     const ticks = [midnight - step, midnight];

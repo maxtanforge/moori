@@ -11,38 +11,44 @@ import (
 	"github.com/maxtanforge/moori/internal/transport/agentwire"
 )
 
-// nodeInventory stores the latest machine resource snapshot the Agent pushed
-// after connecting. Malformed snapshots are acknowledged but not stored: the
-// Agent always sends well-formed JSON it produced itself, and failing the
-// channel over a bad snapshot would only loop a reconnect.
 func (s Session) nodeInventory(ctx context.Context, peer agentwire.Peer, m agentwire.Message) (agentwire.Message, error) {
 	var report agentwire.NodeInventory
 	if err := agentwire.Decode(m, agentwire.KindNodeInventory, &report); err != nil {
 		return agentwire.Message{}, err
 	}
-	if s.Health == nil && s.NodeState == nil {
-		return agentwire.Encode(agentwire.KindNodeInventoryAck, struct{}{})
-	}
 	var overview *localinv.Overview
-	if len(report.Overview) <= localinv.MaxSnapshotBytes && json.Unmarshal(report.Overview, &overview) == nil && overview != nil {
-		// Persist only the documented fields of an authenticated node report.
-		document, err := json.Marshal(overview)
-		if err != nil || len(document) > localinv.MaxSnapshotBytes {
-			return agentwire.Encode(agentwire.KindNodeInventoryAck, struct{}{})
-		}
-		now := time.Now()
-		for _, store := range []*observability.Store{s.NodeState, s.Health} {
-			if store == nil {
-				continue
-			}
-			writeCtx, cancel := context.WithTimeout(ctx, healthWriteTimeout)
-			if err := store.RecordInventory(writeCtx, peer.ID, peer.Generation, document, now); err != nil {
-				slog.Debug("Agent inventory not retained", "agent", peer.ID, "err", err)
-			}
-			cancel()
-		}
-	} else {
+	if len(report.Overview) > localinv.MaxSnapshotBytes || json.Unmarshal(report.Overview, &overview) != nil || overview == nil {
 		slog.Debug("Agent inventory rejected", "agent", peer.ID, "bytes", len(report.Overview))
+		return agentwire.Encode(agentwire.KindNodeInventoryAck, agentwire.NodeInventoryAck{Rejected: true})
 	}
-	return agentwire.Encode(agentwire.KindNodeInventoryAck, struct{}{})
+	// Persist only the documented fields of an authenticated node report.
+	document, err := json.Marshal(overview)
+	if err != nil || len(document) > localinv.MaxSnapshotBytes {
+		return agentwire.Encode(agentwire.KindNodeInventoryAck, agentwire.NodeInventoryAck{Rejected: true})
+	}
+
+	now := time.Now()
+	record := func(store *observability.Store) error {
+		writeCtx, cancel := context.WithTimeout(ctx, healthWriteTimeout)
+		defer cancel()
+		return store.RecordInventory(writeCtx, peer.ID, peer.Generation, document, now)
+	}
+	live := s.NodeState
+	if live == nil {
+		// Older configurations use the health store for the live view too.
+		live = s.Health
+	}
+	if live == nil {
+		return agentwire.Encode(agentwire.KindNodeInventoryAck, agentwire.NodeInventoryAck{Retry: true})
+	}
+	if err := record(live); err != nil {
+		slog.Debug("Agent inventory write needs retry", "agent", peer.ID, "err", err)
+		return agentwire.Encode(agentwire.KindNodeInventoryAck, agentwire.NodeInventoryAck{Retry: true})
+	}
+	if s.Health != nil && s.Health != live {
+		if err := record(s.Health); err != nil {
+			slog.Debug("Agent inventory history not retained", "agent", peer.ID, "err", err)
+		}
+	}
+	return agentwire.Encode(agentwire.KindNodeInventoryAck, agentwire.NodeInventoryAck{})
 }

@@ -178,6 +178,15 @@ func (r Runner) ComposeConfigFiles(ctx context.Context, name string) ([]string, 
 }
 
 func (r Runner) existingComposeContainers(ctx context.Context, name string) ([]container.Summary, error) {
+	rows, err := r.ComposeContainers(ctx, name)
+	if err == nil && len(rows) == 0 {
+		return nil, errors.New("no containers for this Compose project exist on the node")
+	}
+	return rows, err
+}
+
+// ComposeContainers lists all current project members, including stopped services.
+func (r Runner) ComposeContainers(ctx context.Context, name string) ([]container.Summary, error) {
 	if !nodeops.ValidExistingComposeName(name) {
 		return nil, nodeops.ErrInvalid
 	}
@@ -192,9 +201,6 @@ func (r Runner) existingComposeContainers(ctx context.Context, name string) ([]c
 		if item.Labels[composeProjectLabel] == name {
 			matching = append(matching, item)
 		}
-	}
-	if len(matching) == 0 {
-		return nil, errors.New("no containers for this Compose project exist on the node")
 	}
 	return matching, nil
 }
