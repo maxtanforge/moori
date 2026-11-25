@@ -1,0 +1,21 @@
+# Publish Moori's HTTP port for the console and direct Agent connections.
+services:
+  moori:
+    image: ${MOORI_SERVER_IMAGE:-ghcr.io/maxtanforge/moori:0.2.0}
+    # Local Docker execution runs inside the main service; no Agent is required.
+    ports:
+      - "${MOORI_BIND_IP:-0.0.0.0}:8080:8080"
+    volumes:
+      - moori-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /etc/hostname:/host/etc/hostname:ro
+    environment:
+      MOORI_HOST_ROOT: /host
+      MOORI_TRUSTED_PROXY_CIDRS: "${MOORI_TRUSTED_PROXY_CIDRS:-}"
+      MOORI_SECRET_KEY_FILE: "${MOORI_SECRET_KEY_FILE:-}"
+    restart: unless-stopped
+volumes:
+  moori-data:

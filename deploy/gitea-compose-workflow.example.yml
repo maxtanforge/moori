@@ -1,0 +1,73 @@
+# Copy to the application repository's .gitea/workflows/deploy.yml.
+# This example deploys the application's image, not the Moori control service.
+name: Publish and deploy with Moori
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  deploy:
+    # Use a runner with Docker Buildx, curl, jq and network access to Moori and the registry.
+    runs-on: moori-release
+    timeout-minutes: 20
+    env:
+      REGISTRY_HOST: registry.example.com
+      IMAGE_REPOSITORY: registry.example.com/team/web
+      MOORI_PROJECT: team
+      MOORI_TARGET: production
+      MOORI_TEMPLATE: web-v1
+      MOORI_SERVICE: web
+      MOORI_URL: ${{ secrets.MOORI_URL }}
+      MOORI_TOKEN: ${{ secrets.MOORI_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build and push the application image
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -eu
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin
+          docker buildx build --push --tag "$IMAGE_REPOSITORY:$GITHUB_SHA" --metadata-file "$DOCKER_CONFIG/build.json" .
+          digest=$(jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "$DOCKER_CONFIG/build.json")
+          printf 'MOORI_IMAGE=%s@%s\n' "$IMAGE_REPOSITORY" "$digest" >> "$GITHUB_ENV"
+          commit=$(printf '%.20s' "$GITHUB_SHA")
+          printf 'MOORI_RELEASE=%s-%s\n' "$commit" "${digest#sha256:}" >> "$GITHUB_ENV"
+      - name: Publish the pinned release and wait for deployment
+        run: |
+          set -eu
+          : "${MOORI_URL:?Set the MOORI_URL secret}" "${MOORI_TOKEN:?Set the MOORI_TOKEN secret}"
+          base=${MOORI_URL%/}
+          api() {
+            curl --fail-with-body --silent --show-error --max-time 30 \
+              -H "Authorization: Bearer $MOORI_TOKEN" "$@"
+          }
+          release=$(jq -nc --arg project "$MOORI_PROJECT" --arg target "$MOORI_TARGET" \
+            --arg id "$MOORI_RELEASE" --arg template "$MOORI_TEMPLATE" --arg service "$MOORI_SERVICE" --arg image "$MOORI_IMAGE" \
+            '{project:$project,target:$target,id:$id,template:$template,images:{($service):$image}}')
+          api -H 'Content-Type: application/json' --data "$release" "$base/api/v1/releases" >/dev/null
+          request=$(jq -nc --arg project "$MOORI_PROJECT" --arg target "$MOORI_TARGET" --arg release "$MOORI_RELEASE" \
+            '{project:$project,target:$target,release:$release}')
+          receipt=$(api -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: gitea-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}" \
+            --data "$request" "$base/api/v1/deployments")
+          id=$(printf '%s' "$receipt" | jq -er '.id | strings | select(length > 0)')
+          printf 'Moori deployment %s (%s)\n' "$id" "$MOORI_IMAGE"
+          deadline=$(($(date +%s) + 600))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            response=$(api "$base/api/v1/deployments/$id")
+            state=$(printf '%s' "$response" | jq -er .state)
+            printf '%s: %s\n' "$id" "$state"
+            case "$state" in
+              succeeded) exit 0 ;;
+              failed|canceled|abandoned|needs_attention) exit 1 ;;
+            esac
+            sleep 5
+          done
+          printf 'Timed out waiting for %s. Check Moori before retrying.\n' "$id" >&2
+          exit 1

@@ -1,0 +1,18 @@
+# Set MOORI_ENDPOINT and MOORI_AGENT_TOKEN in a private .env file on the Agent host.
+services:
+  moori-agent:
+    image: ${MOORI_AGENT_IMAGE:-ghcr.io/maxtanforge/moori-agent:0.2.0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - moori-agent-data:/data
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /etc/hostname:/host/etc/hostname:ro
+    environment:
+      MOORI_ENDPOINT: "${MOORI_ENDPOINT:?set Agent WebSocket endpoint}"
+      MOORI_AGENT_TOKEN: "${MOORI_AGENT_TOKEN:?set Agent token}"
+      MOORI_HOST_ROOT: /host
+    restart: unless-stopped
+volumes:
+  moori-agent-data:
